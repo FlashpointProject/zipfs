@@ -26,34 +26,38 @@ import (
 // It provides slightly better performance than the
 // http.FileServer implementation because it serves compressed content
 // to clients that can accept the "deflate" compression algorithm.
-func FileServer(fs *FileSystem, baseAPIPath string) http.Handler {
+func FileServer(fs *FileSystem, baseAPIPath string, isVerbose bool) http.Handler {
 	fsVal := []*FileSystem{fs}
 	h := &fileHandler{
 		fs:          fsVal,
 		baseAPIPath: baseAPIPath,
+		isVerbose:   isVerbose,
 	}
 
 	return h
 }
 
-func FileServers(fs []*FileSystem, baseAPIPath string) http.Handler {
+func FileServers(fs []*FileSystem, baseAPIPath string, isVerbose bool) http.Handler {
 	h := &fileHandler{
 		fs:          fs,
 		baseAPIPath: baseAPIPath,
+		isVerbose:   isVerbose,
 	}
 
 	return h
 }
 
-func EmptyFileServer(baseAPIPath string) http.Handler {
+func EmptyFileServer(baseAPIPath string, isVerbose bool) http.Handler {
 	return &fileHandler{
 		baseAPIPath: baseAPIPath,
+		isVerbose:   isVerbose,
 	}
 }
 
 type fileHandler struct {
 	fs          []*FileSystem
 	baseAPIPath string
+	isVerbose   bool
 }
 
 type Mount struct {
@@ -66,16 +70,19 @@ type MountList struct {
 
 func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == path.Join(h.baseAPIPath, "/mountZIP") {
+		fmt.Sprintln("mountZIP Started...")
 		h.MountFs(w, r)
 		return
 	}
 
 	if r.URL.Path == path.Join(h.baseAPIPath, "/unmountZIP") {
+		fmt.Sprintln("unmountZIP Started...")
 		h.UnMountFs(w, r)
 		return
 	}
 
 	if r.URL.Path == path.Join(h.baseAPIPath, "/listMountZIP") {
+		fmt.Sprintln("listMountZIP Started...")
 		h.UnMountFs(w, r)
 		return
 	}
@@ -107,6 +114,10 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 	if fpErr != nil {
 		http.Error(w, fpErr.Error(), http.StatusNotFound)
 		return
+	}
+
+	if h.isVerbose {
+		fmt.Sprintf("Zip Mounted: %s", m.FilePath)
 	}
 
 	h.fs = append(h.fs, newFS)
