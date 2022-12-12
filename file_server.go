@@ -9,6 +9,7 @@ package zipfs
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -25,30 +26,149 @@ import (
 // It provides slightly better performance than the
 // http.FileServer implementation because it serves compressed content
 // to clients that can accept the "deflate" compression algorithm.
-func FileServer(fs *FileSystem) http.Handler {
+func FileServer(fs *FileSystem, baseAPIPath string) http.Handler {
+	fsVal := []*FileSystem{fs}
 	h := &fileHandler{
-		fs: fs,
+		fs:          fsVal,
+		baseAPIPath: baseAPIPath,
 	}
 
 	return h
 }
 
+func FileServers(fs []*FileSystem, baseAPIPath string) http.Handler {
+	h := &fileHandler{
+		fs:          fs,
+		baseAPIPath: baseAPIPath,
+	}
+
+	return h
+}
+
+func EmptyFileServer(baseAPIPath string) http.Handler {
+	return &fileHandler{
+		baseAPIPath: baseAPIPath,
+	}
+}
+
 type fileHandler struct {
-	fs *FileSystem
+	fs          []*FileSystem
+	baseAPIPath string
+}
+
+type Mount struct {
+	FilePath string `json:"filePath"`
+}
+
+type MountList struct {
+	MountedZips []string `json:"mountedZips"`
 }
 
 func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == path.Join(h.baseAPIPath, "/mountZIP") {
+		h.MountFs(w, r)
+		return
+	}
+
+	if r.URL.Path == path.Join(h.baseAPIPath, "/unmountZIP") {
+		h.UnMountFs(w, r)
+		return
+	}
+
+	if r.URL.Path == path.Join(h.baseAPIPath, "/listMountZIP") {
+		h.UnMountFs(w, r)
+		return
+	}
+
 	upath := r.URL.Path
 	if !strings.HasPrefix(upath, "/") {
 		upath = "/" + upath
 		r.URL.Path = upath
 	}
 
-	serveFile(w, r, h.fs, path.Clean(upath), true)
+	serveFiles(w, r, h.fs, path.Clean(upath), true)
+}
+
+//Add a ZIP file at runtime.
+func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST request expected.", http.StatusBadRequest)
+		return
+	}
+
+	var m Mount
+	err := json.NewDecoder(r.Body).Decode(&m)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	newFS, fpErr := New(m.FilePath)
+	if fpErr != nil {
+		http.Error(w, fpErr.Error(), http.StatusNotFound)
+		return
+	}
+
+	h.fs = append(h.fs, newFS)
+	w.Write([]byte(`{
+		"msg": "File has been added!"
+	}`))
+	return
+}
+
+//Remove a ZIP file at runtime.
+func (h *fileHandler) UnMountFs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST request expected.", http.StatusBadRequest)
+		return
+	}
+
+	var m Mount
+	err := json.NewDecoder(r.Body).Decode(&m)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	//Loop through and remove the zip requested
+	for i := len(h.fs) - 1; i >= 0; i-- {
+		if h.fs[i].givenPath == m.FilePath {
+			h.fs = append(h.fs[:i], h.fs[i+1:]...)
+		}
+	}
+
+	w.Write([]byte(`{
+		"msg": "File has been removed!"
+	}`))
+	return
+}
+
+//Remove a ZIP file at runtime.
+func (h *fileHandler) ListMountedFs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "GET request expected.", http.StatusBadRequest)
+		return
+	}
+
+	var ml MountList
+	for _, fse := range h.fs {
+		ml.MountedZips = append(ml.MountedZips, fse.givenPath)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ml)
+	return
 }
 
 // name is '/'-separated, not filepath.Separator.
-func serveFile(w http.ResponseWriter, r *http.Request, fs *FileSystem, name string, redirect bool) {
+func serveFiles(w http.ResponseWriter, r *http.Request, fs []*FileSystem, name string, redirect bool) {
+	//If a file is attempting to be served, but no zips are available
+	//We want to fail gracefully.
+	if len(fs) == 0 {
+		http.Error(w, "File not found, no ZIP is added.", http.StatusNotFound)
+		return
+	}
+
 	const indexPage = "/index.html"
 
 	// redirect .../index.html to .../
@@ -59,49 +179,78 @@ func serveFile(w http.ResponseWriter, r *http.Request, fs *FileSystem, name stri
 		return
 	}
 
-	d, err := fs.openFileInfo(name)
-	if err != nil {
-		msg, code := toHTTPError(err)
-		http.Error(w, msg, code)
+	var fi *fileInfo
+	var fsVal *FileSystem
+	var errVal error
+
+	var errMsg string
+	var errCode int
+	var errFlag bool = false
+
+	//Loop through the files in order to find the first match
+	for _, fse := range fs {
+		errFlag = false
+		errVal = nil
+		fii, err := fse.openFileInfo(name)
+		if err != nil {
+			errVal = err
+		}
+		fsVal = fse
+		fi = fii
+
+		//If we did not find a file above it will note the error and
+		//move onto the next zip to see if the file is there.
+		if errVal != nil {
+			errFlag = true
+			errMsg, errCode = toHTTPError(errVal)
+			continue
+		}
+
+		if redirect {
+			// redirect to canonical path: / at end of directory url
+			// r.URL.Path always begins with /
+			url := r.URL.Path
+			if fi.IsDir() {
+				if url[len(url)-1] != '/' {
+					localRedirect(w, r, path.Base(url)+"/")
+					return
+				}
+			} else {
+				if url[len(url)-1] == '/' {
+					localRedirect(w, r, "../"+path.Base(url))
+					return
+				}
+			}
+		}
+
+		// use contents of index.html for directory, if present
+		if fi.IsDir() {
+			index := strings.TrimSuffix(name, "/") + indexPage
+			fii, err := fsVal.openFileInfo(index)
+			if err == nil {
+				fi = fii
+			}
+		}
+
+		// Still a directory? (we didn't find an index.html file)
+		if fi.IsDir() {
+			// Unlike the standard library implementation, directory
+			// listing is prohibited.
+			errFlag = true
+			errMsg = "Forbidden"
+			errCode = http.StatusForbidden
+			continue
+		}
+
+		// serveContent will check modification time and ETag
+		serveContent(w, r, fsVal, fi)
 		return
 	}
 
-	if redirect {
-		// redirect to canonical path: / at end of directory url
-		// r.URL.Path always begins with /
-		url := r.URL.Path
-		if d.IsDir() {
-			if url[len(url)-1] != '/' {
-				localRedirect(w, r, path.Base(url)+"/")
-				return
-			}
-		} else {
-			if url[len(url)-1] == '/' {
-				localRedirect(w, r, "../"+path.Base(url))
-				return
-			}
-		}
-	}
-
-	// use contents of index.html for directory, if present
-	if d.IsDir() {
-		index := strings.TrimSuffix(name, "/") + indexPage
-		dd, err := fs.openFileInfo(index)
-		if err == nil {
-			d = dd
-		}
-	}
-
-	// Still a directory? (we didn't find an index.html file)
-	if d.IsDir() {
-		// Unlike the standard library implementation, directory
-		// listing is prohibited.
-		http.Error(w, "Forbidden", http.StatusForbidden)
+	if errFlag {
+		http.Error(w, errMsg, errCode)
 		return
 	}
-
-	// serveContent will check modification time and ETag
-	serveContent(w, r, fs, d)
 }
 
 func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo) {

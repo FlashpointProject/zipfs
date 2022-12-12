@@ -28,6 +28,8 @@ type FileSystem struct {
 	closer    io.Closer
 	reader    *zip.Reader
 	fileInfos fileInfoMap
+	givenPath string
+	fullPath  string
 }
 
 // New will open the Zip file specified by name and
@@ -41,12 +43,12 @@ func New(name string) (*FileSystem, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewFromReaderAt(file, fi.Size(), file)
+	return NewFromReaderAt(file, fi.Size(), file, name)
 }
 
 // NewFromReaderAt will open the Zip file accessible by readerAt with the given size.
 // The closer, if not nil, will be called when the file system is closed.
-func NewFromReaderAt(readerAt io.ReaderAt, size int64, closer io.Closer) (*FileSystem, error) {
+func NewFromReaderAt(readerAt io.ReaderAt, size int64, closer io.Closer, filePath string) (*FileSystem, error) {
 	zipReader, err := zip.NewReader(readerAt, size)
 	if err != nil {
 		return nil, err
@@ -58,11 +60,14 @@ func NewFromReaderAt(readerAt io.ReaderAt, size int64, closer io.Closer) (*FileS
 	// not actually used outside of this function so it probably
 	// does not need to be in the FileSystem structure. Keeping it
 	// there for now but may remove it in future.
+	workingDir, _ := os.Getwd()
 	fs := &FileSystem{
 		closer:    closer,
 		readerAt:  readerAt,
 		reader:    zipReader,
 		fileInfos: fileInfoMap{},
+		givenPath: filePath,
+		fullPath:  path.Join(workingDir, filePath),
 	}
 
 	// Build a map of file paths to speed lookup.

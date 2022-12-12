@@ -3,7 +3,7 @@ package zipfs_test
 import (
 	"net/http"
 
-	"github.com/spkg/zipfs"
+	"github.com/krum110487/zipfs"
 )
 
 func Example() error {
@@ -12,5 +12,5 @@ func Example() error {
 		return err
 	}
 
-	return http.ListenAndServe(":8080", zipfs.FileServer(fs))
+	return http.ListenAndServe(":8080", zipfs.FileServer(fs, "test/base/api/"))
 }
