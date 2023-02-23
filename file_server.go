@@ -26,31 +26,34 @@ import (
 // It provides slightly better performance than the
 // http.FileServer implementation because it serves compressed content
 // to clients that can accept the "deflate" compression algorithm.
-func FileServer(fs *FileSystem, baseAPIPath string, isVerbose bool) http.Handler {
+func FileServer(fs *FileSystem, baseAPIPath string, urlPrepend string, isVerbose bool) http.Handler {
 	fsVal := []*FileSystem{fs}
 	h := &fileHandler{
 		fs:          fsVal,
 		baseAPIPath: baseAPIPath,
 		isVerbose:   isVerbose,
+		urlPrepend:  urlPrepend,
 	}
 
 	return h
 }
 
-func FileServers(fs []*FileSystem, baseAPIPath string, isVerbose bool) http.Handler {
+func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerbose bool) http.Handler {
 	h := &fileHandler{
 		fs:          fs,
 		baseAPIPath: baseAPIPath,
 		isVerbose:   isVerbose,
+		urlPrepend:  urlPrepend,
 	}
 
 	return h
 }
 
-func EmptyFileServer(baseAPIPath string, isVerbose bool) http.Handler {
+func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool) http.Handler {
 	return &fileHandler{
 		baseAPIPath: baseAPIPath,
 		isVerbose:   isVerbose,
+		urlPrepend:  urlPrepend,
 	}
 }
 
@@ -58,6 +61,7 @@ type fileHandler struct {
 	fs          []*FileSystem
 	baseAPIPath string
 	isVerbose   bool
+	urlPrepend  string
 }
 
 type Mount struct {
@@ -69,21 +73,21 @@ type MountList struct {
 }
 
 func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == path.Join(h.baseAPIPath, "/mountZIP") {
-		fmt.Sprintln("mountZIP Started...")
+	var urlPath = strings.ToLower(r.URL.Path)
+	var basePath = strings.ToLower(h.baseAPIPath)
+
+	if urlPath == path.Join("/", basePath, "/mountzip") {
 		h.MountFs(w, r)
 		return
 	}
 
-	if r.URL.Path == path.Join(h.baseAPIPath, "/unmountZIP") {
-		fmt.Sprintln("unmountZIP Started...")
+	if urlPath == path.Join("/", basePath, "/unmountzip") {
 		h.UnMountFs(w, r)
 		return
 	}
 
-	if r.URL.Path == path.Join(h.baseAPIPath, "/listMountZIP") {
-		fmt.Sprintln("listMountZIP Started...")
-		h.UnMountFs(w, r)
+	if urlPath == path.Join("/", basePath, "/listmountzip") {
+		h.ListMountedFs(w, r)
 		return
 	}
 
@@ -92,13 +96,13 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		upath = "/" + upath
 		r.URL.Path = upath
 	}
-
 	serveFiles(w, r, h.fs, path.Clean(upath), true)
 }
 
-//Add a ZIP file at runtime.
+// Add a ZIP file at runtime.
 func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
+		fmt.Printf("Error (MountFs): Invalid request, not a POST")
 		http.Error(w, "POST request expected.", http.StatusBadRequest)
 		return
 	}
@@ -106,18 +110,21 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 	var m Mount
 	err := json.NewDecoder(r.Body).Decode(&m)
 	if err != nil {
+		fmt.Printf("Error (MountFs): %s\n", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	fmt.Printf("Mounting Zip: %s\n", m.FilePath)
 	newFS, fpErr := New(m.FilePath)
 	if fpErr != nil {
+		fmt.Printf("Error (MountFs): %s\n", fpErr.Error())
 		http.Error(w, fpErr.Error(), http.StatusNotFound)
 		return
 	}
 
 	if h.isVerbose {
-		fmt.Sprintf("Zip Mounted: %s", m.FilePath)
+		fmt.Printf("Zip Mounted: %s\n", m.FilePath)
 	}
 
 	h.fs = append(h.fs, newFS)
@@ -127,9 +134,10 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-//Remove a ZIP file at runtime.
+// Remove a ZIP file at runtime.
 func (h *fileHandler) UnMountFs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
+		fmt.Printf("Error (UnMountFs): Invalid request, not a POST\n")
 		http.Error(w, "POST request expected.", http.StatusBadRequest)
 		return
 	}
@@ -137,15 +145,23 @@ func (h *fileHandler) UnMountFs(w http.ResponseWriter, r *http.Request) {
 	var m Mount
 	err := json.NewDecoder(r.Body).Decode(&m)
 	if err != nil {
+		fmt.Printf("Error (UnMountFs): %s\n", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	//Loop through and remove the zip requested
+	fmt.Printf("UnMounting Zip: %s\n", m.FilePath)
+	var found = false
 	for i := len(h.fs) - 1; i >= 0; i-- {
 		if h.fs[i].givenPath == m.FilePath {
+			found = true
 			h.fs = append(h.fs[:i], h.fs[i+1:]...)
 		}
+	}
+
+	if found && h.isVerbose {
+		fmt.Printf("Zip UnMounted: %s\n", m.FilePath)
 	}
 
 	w.Write([]byte(`{
@@ -154,9 +170,10 @@ func (h *fileHandler) UnMountFs(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-//Remove a ZIP file at runtime.
+// Remove a ZIP file at runtime.
 func (h *fileHandler) ListMountedFs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
+		fmt.Printf("Error (ListMountedFs): Invalid request, not a GET\n")
 		http.Error(w, "GET request expected.", http.StatusBadRequest)
 		return
 	}
@@ -176,6 +193,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, fs []*FileSystem, name s
 	//If a file is attempting to be served, but no zips are available
 	//We want to fail gracefully.
 	if len(fs) == 0 {
+		fmt.Printf("Error (serveFiles): File not found, no ZIP is added.\n")
 		http.Error(w, "File not found, no ZIP is added.", http.StatusNotFound)
 		return
 	}
