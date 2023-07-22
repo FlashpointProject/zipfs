@@ -51,21 +51,23 @@ func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerb
 	return h
 }
 
-func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string) http.Handler {
+func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string) http.Handler {
 	return &fileHandler{
-		baseAPIPath: baseAPIPath,
-		isVerbose:   isVerbose,
-		urlPrepend:  urlPrepend,
-		indexExts:   indexExts,
+		baseAPIPath:  baseAPIPath,
+		isVerbose:    isVerbose,
+		urlPrepend:   urlPrepend,
+		indexExts:    indexExts,
+		baseMountDir: baseMountDir,
 	}
 }
 
 type fileHandler struct {
-	fs          []*FileSystem
-	baseAPIPath string
-	isVerbose   bool
-	urlPrepend  string
-	indexExts   []string
+	fs           []*FileSystem
+	baseAPIPath  string
+	isVerbose    bool
+	urlPrepend   string
+	indexExts    []string
+	baseMountDir string
 }
 
 type Mount struct {
@@ -119,8 +121,33 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Printf("Mounting Zip: %s\n", m.FilePath)
-	newFS, fpErr := New(m.FilePath)
+	// Ensure the zip is within the base directory
+	var zipPath string
+	if filepath.IsAbs(m.FilePath) {
+		zipPath = path.Clean(m.FilePath)
+	} else {
+		zipPath = path.Join(h.baseMountDir, m.FilePath)
+		zipPath = path.Clean(zipPath)
+	}
+	if !strings.HasPrefix(zipPath, h.baseMountDir) {
+		fmt.Printf("Error (MountFs): Illegal path access (%s) %s", m.FilePath, zipPath)
+		http.Error(w, "Illegal path access", http.StatusBadRequest)
+		return
+	}
+
+	// Prevent duplicate mounts
+	for _, fse := range h.fs {
+		if fse.givenPath == zipPath {
+			fmt.Printf("Error (MountFs): Zip already mounted (%s) %s", m.FilePath, zipPath)
+			JsonResponse(w, SimpleResponseData{
+				Message: "Zip file already mounted!",
+			}, http.StatusOK)
+			return
+		}
+	}
+
+	fmt.Printf("Mounting Zip: %s\n", zipPath)
+	newFS, fpErr := New(zipPath)
 	if fpErr != nil {
 		fmt.Printf("Error (MountFs): %s\n", fpErr.Error())
 		http.Error(w, fpErr.Error(), http.StatusNotFound)
@@ -128,13 +155,13 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.isVerbose {
-		fmt.Printf("Zip Mounted: %s\n", m.FilePath)
+		fmt.Printf("Zip Mounted: %s\n", zipPath)
 	}
 
 	h.fs = append(h.fs, newFS)
-	w.Write([]byte(`{
-		"msg": "File has been added!"
-	}`))
+	JsonResponse(w, SimpleResponseData{
+		Message: "Zip file mounted!",
+	}, http.StatusOK)
 	return
 }
 
@@ -154,23 +181,37 @@ func (h *fileHandler) UnMountFs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Ensure the zip is within the base directory
+	var zipPath string
+	if filepath.IsAbs(m.FilePath) {
+		zipPath = path.Clean(m.FilePath)
+	} else {
+		zipPath = path.Join(h.baseMountDir, m.FilePath)
+		zipPath = path.Clean(zipPath)
+	}
+	if !strings.HasPrefix(zipPath, h.baseMountDir) {
+		fmt.Printf("Error (MountFs): Illegal path access (%s) %s", m.FilePath, zipPath)
+		http.Error(w, "Illegal path access", http.StatusBadRequest)
+		return
+	}
+
 	//Loop through and remove the zip requested
-	fmt.Printf("UnMounting Zip: %s\n", m.FilePath)
+	fmt.Printf("UnMounting Zip: %s\n", zipPath)
 	var found = false
 	for i := len(h.fs) - 1; i >= 0; i-- {
-		if h.fs[i].givenPath == m.FilePath {
+		if h.fs[i].givenPath == zipPath {
 			found = true
 			h.fs = append(h.fs[:i], h.fs[i+1:]...)
 		}
 	}
 
 	if found && h.isVerbose {
-		fmt.Printf("Zip UnMounted: %s\n", m.FilePath)
+		fmt.Printf("Zip UnMounted: %s\n", zipPath)
 	}
 
-	w.Write([]byte(`{
-		"msg": "File has been removed!"
-	}`))
+	JsonResponse(w, SimpleResponseData{
+		Message: "Zip file unmounted!",
+	}, http.StatusOK)
 	return
 }
 
@@ -218,7 +259,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 
 	var errMsg string
 	var errCode int
-	var errFlag bool = false
+	var errFlag = false
 
 	//Loop through the files in order to find the first match
 	for _, fse := range h.fs {
@@ -345,7 +386,7 @@ func serveIdentity(w http.ResponseWriter, r *http.Request, zf *zip.File) {
 	w.Header().Del("Content-Encoding")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	if r.Method != "HEAD" {
-		io.CopyN(w, reader, int64(size))
+		io.CopyN(w, reader, size)
 	}
 }
 
@@ -365,7 +406,7 @@ func serveDeflate(w http.ResponseWriter, r *http.Request, f *zip.File, readerAt 
 
 	contentLength := int64(f.CompressedSize64)
 	if contentLength == 0 {
-		contentLength = int64(f.CompressedSize)
+		contentLength = int64(f.CompressedSize64)
 	}
 	w.Header().Set("Content-Encoding", "deflate")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", contentLength))
@@ -438,9 +479,9 @@ func setContentType(w http.ResponseWriter, filename string) {
 func calcEtag(f *zip.File) string {
 	size := f.UncompressedSize64
 	if size == 0 {
-		size = uint64(f.UncompressedSize)
+		size = f.UncompressedSize64
 	}
-	etag := uint64(f.CRC32) ^ (uint64(size&0xffffffff) << 32)
+	etag := uint64(f.CRC32) ^ (size & 0xffffffff << 32)
 
 	// etag should always be in double quotes
 	return fmt.Sprintf(`"%x"`, etag)
@@ -559,4 +600,14 @@ func localRedirect(w http.ResponseWriter, r *http.Request, newPath string) {
 	}
 	w.Header().Set("Location", newPath)
 	w.WriteHeader(http.StatusMovedPermanently)
+}
+
+type SimpleResponseData struct {
+	Message string `json:"msg"`
+}
+
+func JsonResponse(w http.ResponseWriter, data interface{}, status int) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	return json.NewEncoder(w).Encode(data)
 }
