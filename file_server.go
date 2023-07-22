@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/kiancyc/gophp"
 )
 
 // FileServer returns a HTTP handler that serves
@@ -51,13 +53,14 @@ func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerb
 	return h
 }
 
-func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string) http.Handler {
+func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string) http.Handler {
 	return &fileHandler{
 		baseAPIPath:  baseAPIPath,
 		isVerbose:    isVerbose,
 		urlPrepend:   urlPrepend,
 		indexExts:    indexExts,
 		baseMountDir: baseMountDir,
+		phpPath:      phpPath,
 	}
 }
 
@@ -68,6 +71,7 @@ type fileHandler struct {
 	urlPrepend   string
 	indexExts    []string
 	baseMountDir string
+	phpPath      string
 }
 
 type Mount struct {
@@ -102,7 +106,7 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		upath = "/" + upath
 		r.URL.Path = upath
 	}
-	serveFiles(w, r, h, path.Clean(upath), true)
+	serveFiles(w, r, h, path.Clean(upath), true, h.phpPath)
 }
 
 // Add a ZIP file at runtime.
@@ -139,7 +143,7 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 	for _, fse := range h.fs {
 		if fse.givenPath == zipPath {
 			fmt.Printf("Error (MountFs): Zip already mounted (%s) %s", m.FilePath, zipPath)
-			JsonResponse(w, SimpleResponseData{
+			makeJsonResponse(w, SimpleResponseData{
 				Message: "Zip file already mounted!",
 			}, http.StatusOK)
 			return
@@ -159,7 +163,7 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.fs = append(h.fs, newFS)
-	JsonResponse(w, SimpleResponseData{
+	makeJsonResponse(w, SimpleResponseData{
 		Message: "Zip file mounted!",
 	}, http.StatusOK)
 	return
@@ -209,7 +213,7 @@ func (h *fileHandler) UnMountFs(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Zip UnMounted: %s\n", zipPath)
 	}
 
-	JsonResponse(w, SimpleResponseData{
+	makeJsonResponse(w, SimpleResponseData{
 		Message: "Zip file unmounted!",
 	}, http.StatusOK)
 	return
@@ -234,7 +238,7 @@ func (h *fileHandler) ListMountedFs(w http.ResponseWriter, r *http.Request) {
 }
 
 // name is '/'-separated, not filepath.Separator.
-func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name string, redirect bool) {
+func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name string, redirect bool, phpPath string) {
 	//If a file is attempting to be served, but no zips are available
 	//We want to fail gracefully.
 	if len(h.fs) == 0 {
@@ -324,7 +328,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 
 		// serveContent will check modification time and ETag
 		w.Header().Set("ZIPSVR_FILENAME", fi.name)
-		serveContent(w, r, fsVal, fi)
+		serveContent(w, r, fsVal, fi, phpPath)
 		return
 	}
 
@@ -334,7 +338,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 	}
 }
 
-func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo) {
+func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo, phpPath string) {
 	if checkLastModified(w, r, fi.ModTime()) {
 		return
 	}
@@ -360,20 +364,36 @@ func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fi
 
 	switch fi.zipFile.Method {
 	case zip.Store:
-		serveIdentity(w, r, fi.zipFile)
+		serveIdentity(w, r, fi, phpPath)
 	case zip.Deflate:
-		serveDeflate(w, r, fi.zipFile, fs.readerAt)
+		serveDeflate(w, r, fi, fs.readerAt, phpPath)
 	default:
 		http.Error(w, fmt.Sprintf("unsupported zip method: %d", fi.zipFile.Method), http.StatusInternalServerError)
 	}
 }
 
 // serveIdentity serves a zip file in identity content encoding .
-func serveIdentity(w http.ResponseWriter, r *http.Request, zf *zip.File) {
+func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath string) {
 	// TODO: need to check if the client explicitly refuses to accept
 	// identity encoding (Accept-Encoding: identity;q=0), but this is
 	// going to be very rare.
 
+	// Divert php requests
+	if phpPath != "" && checkForPhp(fi.name) {
+		f := fi.openReader(r.URL.Path)
+		defer f.Close()
+		err := f.createTempFile()
+		if err != nil {
+			fmt.Println(err.Error())
+			http.Error(w, "Error unpacking php file", http.StatusInternalServerError)
+			return
+		}
+
+		gophp.Cgi(w, r, phpPath, f.file.Name())
+		return
+	}
+
+	zf := fi.zipFile
 	reader, err := zf.Open()
 	if err != nil {
 		msg, code := toHTTPError(err)
@@ -392,7 +412,7 @@ func serveIdentity(w http.ResponseWriter, r *http.Request, zf *zip.File) {
 
 // serveDeflat serves a zip file in deflate content-encoding if the
 // user agent can accept it. Otherwise it calls serveIdentity.
-func serveDeflate(w http.ResponseWriter, r *http.Request, f *zip.File, readerAt io.ReaderAt) {
+func serveDeflate(w http.ResponseWriter, r *http.Request, fi *fileInfo, readerAt io.ReaderAt, phpPath string) {
 	acceptEncoding := r.Header.Get("Accept-Encoding")
 
 	// TODO: need to parse the accept header to work out if the
@@ -400,10 +420,11 @@ func serveDeflate(w http.ResponseWriter, r *http.Request, f *zip.File, readerAt 
 	acceptsDeflate := strings.Contains(acceptEncoding, "deflate")
 	if !acceptsDeflate {
 		// client will not accept deflate, so serve as identity
-		serveIdentity(w, r, f)
+		serveIdentity(w, r, fi, phpPath)
 		return
 	}
 
+	f := fi.zipFile
 	contentLength := int64(f.CompressedSize64)
 	if contentLength == 0 {
 		contentLength = int64(f.CompressedSize64)
@@ -606,8 +627,20 @@ type SimpleResponseData struct {
 	Message string `json:"msg"`
 }
 
-func JsonResponse(w http.ResponseWriter, data interface{}, status int) error {
+func makeJsonResponse(w http.ResponseWriter, data interface{}, status int) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	return json.NewEncoder(w).Encode(data)
+}
+
+func checkForPhp(filePath string) bool {
+	suffixes := []string{".php", ".phtml", ".php5"}
+
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(filePath, suffix) {
+			return true
+		}
+	}
+
+	return false
 }
