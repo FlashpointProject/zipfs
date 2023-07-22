@@ -26,34 +26,37 @@ import (
 // It provides slightly better performance than the
 // http.FileServer implementation because it serves compressed content
 // to clients that can accept the "deflate" compression algorithm.
-func FileServer(fs *FileSystem, baseAPIPath string, urlPrepend string, isVerbose bool) http.Handler {
+func FileServer(fs *FileSystem, baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string) http.Handler {
 	fsVal := []*FileSystem{fs}
 	h := &fileHandler{
 		fs:          fsVal,
 		baseAPIPath: baseAPIPath,
 		isVerbose:   isVerbose,
 		urlPrepend:  urlPrepend,
+		indexExts:   indexExts,
 	}
 
 	return h
 }
 
-func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerbose bool) http.Handler {
+func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string) http.Handler {
 	h := &fileHandler{
 		fs:          fs,
 		baseAPIPath: baseAPIPath,
 		isVerbose:   isVerbose,
 		urlPrepend:  urlPrepend,
+		indexExts:   indexExts,
 	}
 
 	return h
 }
 
-func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool) http.Handler {
+func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string) http.Handler {
 	return &fileHandler{
 		baseAPIPath: baseAPIPath,
 		isVerbose:   isVerbose,
 		urlPrepend:  urlPrepend,
+		indexExts:   indexExts,
 	}
 }
 
@@ -62,6 +65,7 @@ type fileHandler struct {
 	baseAPIPath string
 	isVerbose   bool
 	urlPrepend  string
+	indexExts   []string
 }
 
 type Mount struct {
@@ -73,7 +77,7 @@ type MountList struct {
 }
 
 func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var urlPath = strings.ToLower(r.URL.Path)
+	var urlPath = path.Join("/", strings.ToLower(r.URL.Path))
 	var basePath = strings.ToLower(h.baseAPIPath)
 
 	if urlPath == path.Join("/", basePath, "/mountzip") {
@@ -96,7 +100,7 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		upath = "/" + upath
 		r.URL.Path = upath
 	}
-	serveFiles(w, r, h.fs, path.Clean(upath), true)
+	serveFiles(w, r, h, path.Clean(upath), true)
 }
 
 // Add a ZIP file at runtime.
@@ -189,10 +193,10 @@ func (h *fileHandler) ListMountedFs(w http.ResponseWriter, r *http.Request) {
 }
 
 // name is '/'-separated, not filepath.Separator.
-func serveFiles(w http.ResponseWriter, r *http.Request, fs []*FileSystem, name string, redirect bool) {
+func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name string, redirect bool) {
 	//If a file is attempting to be served, but no zips are available
 	//We want to fail gracefully.
-	if len(fs) == 0 {
+	if len(h.fs) == 0 {
 		fmt.Printf("Error (serveFiles): File not found, no ZIP is added.\n")
 		http.Error(w, "File not found, no ZIP is added.", http.StatusNotFound)
 		return
@@ -217,7 +221,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, fs []*FileSystem, name s
 	var errFlag bool = false
 
 	//Loop through the files in order to find the first match
-	for _, fse := range fs {
+	for _, fse := range h.fs {
 		errFlag = false
 		errVal = nil
 		fii, err := fse.openFileInfo(name)
@@ -252,12 +256,18 @@ func serveFiles(w http.ResponseWriter, r *http.Request, fs []*FileSystem, name s
 			}
 		}
 
-		// use contents of index.html for directory, if present
+		//Loop through all available extensions and attempt to open them.
 		if fi.IsDir() {
-			index := strings.TrimSuffix(name, "/") + indexPage
-			fii, err := fsVal.openFileInfo(index)
-			if err == nil {
-				fi = fii
+			for _, extension := range h.indexExts {
+				// use contents of index.html for directory, if present
+				index := path.Join(name, "/index."+extension)
+				fmt.Printf("NEWINDEX = %s", index)
+				fii, err := fsVal.openFileInfo(index)
+				if err == nil {
+					fi = fii
+				} else {
+					break //The file was found, stop looping.
+				}
 			}
 		}
 
@@ -272,6 +282,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, fs []*FileSystem, name s
 		}
 
 		// serveContent will check modification time and ETag
+		w.Header().Set("ZIPSVR_FILENAME", fi.name)
 		serveContent(w, r, fsVal, fi)
 		return
 	}

@@ -82,7 +82,8 @@ func TestMountZip(t *testing.T) {
 	assert := assert.New(t)
 	//require := require.New(t)
 
-	handler := EmptyFileServer("test/api/path/", "", true)
+	extensions := []string{"html", "htm"}
+	handler := EmptyFileServer("test/api/path/", "", true, extensions)
 
 	testCases := []struct {
 		Path            string
@@ -320,7 +321,8 @@ func TestServeHTTP(t *testing.T) {
 	require.NoError(err)
 	require.NotNil(fs)
 
-	handler := FileServer(fs, "test/base/api/", "", true)
+	extensions := []string{"html", "htm"}
+	handler := FileServer(fs, "test/base/api/", "", true, extensions)
 
 	testCases := []struct {
 		Path            string

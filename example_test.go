@@ -12,5 +12,6 @@ func Example() error {
 		return err
 	}
 
-	return http.ListenAndServe(":8080", zipfs.FileServer(fs, "test/base/api/", "", true))
+	extensions := []string{"html", "htm"}
+	return http.ListenAndServe(":8080", zipfs.FileServer(fs, "test/base/api/", "", true, extensions))
 }
