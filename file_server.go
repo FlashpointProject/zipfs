@@ -305,13 +305,11 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 		if fi.IsDir() {
 			for _, extension := range h.indexExts {
 				// use contents of index.html for directory, if present
-				index := path.Join(name, "/index."+extension)
+				index := path.Join(strings.TrimPrefix(name, "/"), "/index."+extension)
 				fmt.Printf("NEWINDEX = %s", index)
 				fii, err := fsVal.openFileInfo(index)
 				if err == nil {
 					fi = fii
-				} else {
-					break //The file was found, stop looping.
 				}
 			}
 		}
