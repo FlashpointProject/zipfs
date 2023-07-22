@@ -363,10 +363,10 @@ func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fi
 	setContentType(w, fi.Name())
 
 	switch fi.zipFile.Method {
+	case zip.Deflate:
+		fallthrough
 	case zip.Store:
 		serveIdentity(w, r, fi, phpPath)
-	case zip.Deflate:
-		serveDeflate(w, r, fi, fs.readerAt, phpPath)
 	default:
 		http.Error(w, fmt.Sprintf("unsupported zip method: %d", fi.zipFile.Method), http.StatusInternalServerError)
 	}
