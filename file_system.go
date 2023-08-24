@@ -143,7 +143,7 @@ func (fs *FileSystem) openFileInfo(name string) (*fileInfo, error) {
 	if fs.readerAt == nil {
 		return nil, errFileSystemClosed
 	}
-	name = path.Clean(name)
+	name = strings.ToLower(path.Clean(name))
 	trimmedName := strings.TrimLeft(name, "/")
 	fi := fs.fileInfos[trimmedName]
 	if fi == nil {
@@ -157,6 +157,7 @@ func (fs *FileSystem) openFileInfo(name string) (*fileInfo, error) {
 type fileInfoMap map[string]*fileInfo
 
 func (fm fileInfoMap) FindOrCreate(name string) *fileInfo {
+	name = strings.ToLower(name)
 	strippedName := strings.TrimRight(name, "/")
 	fi := fm[name]
 	if fi == nil {

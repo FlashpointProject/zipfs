@@ -31,6 +31,19 @@ func TestFileSystem(t *testing.T) {
 
 }
 
+func TestCaseInsensitive(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	fs, err := New("testdata/testdata.zip")
+	require.NoError(err)
+	require.NotNil(fs)
+
+	f, err := fs.Open("test.HTML")
+	assert.NoError(err)
+	assert.NotNil(f)
+}
+
 func TestOpen(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
