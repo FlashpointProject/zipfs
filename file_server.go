@@ -293,7 +293,14 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 
 		// serveContent will check modification time and ETag
 		w.Header().Set("ZIPSVR_FILENAME", fi.name)
-		serveContent(w, r, fsVal, fi)
+
+		//If the default value exists, send it over to be used, otherwise use default functionality.
+		mimeDefaultOverride, defExists := h.mimeExts["default"]
+		if defExists {
+			serveContent(w, r, fsVal, fi, &mimeDefaultOverride)
+		} else {
+			serveContent(w, r, fsVal, fi, nil)
+		}
 		return
 	}
 
@@ -303,7 +310,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 	}
 }
 
-func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo) {
+func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo, defaultMime *string) {
 	if checkLastModified(w, r, fi.ModTime()) {
 		return
 	}
@@ -325,7 +332,7 @@ func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fi
 		return
 	}
 
-	setContentType(w, fi.Name())
+	setContentType(w, fi.Name(), defaultMime)
 
 	switch fi.zipFile.Method {
 	case zip.Store:
@@ -424,7 +431,7 @@ func serveDeflate(w http.ResponseWriter, r *http.Request, f *zip.File, readerAt 
 	}
 }
 
-func setContentType(w http.ResponseWriter, filename string) {
+func setContentType(w http.ResponseWriter, filename string, defaultMime *string) {
 	ctypes, haveType := w.Header()["Content-Type"]
 	var ctype string
 
@@ -434,7 +441,12 @@ func setContentType(w http.ResponseWriter, filename string) {
 			// the standard library sniffs content to decide whether it is
 			// binary or text, but this requires a ReaderSeeker, and we
 			// only have a reader from the zip file. Assume binary.
-			ctype = "application/octet-stream"
+			// unless the default mime is overridden, then use that!
+			if defaultMime == nil {
+				ctype = "application/octet-stream"
+			} else {
+				ctype = *defaultMime
+			}
 		}
 	} else if len(ctypes) > 0 {
 		ctype = ctypes[0]
