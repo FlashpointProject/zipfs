@@ -44,6 +44,27 @@ func TestCaseInsensitive(t *testing.T) {
 	assert.NotNil(f)
 }
 
+func TestSpecialCharacters(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	fs, err := New("testdata/testdata.zip")
+	require.NoError(err)
+	require.NotNil(fs)
+
+	f, err := fs.Open("Porte Fermée.txt")
+	assert.NoError(err)
+	assert.NotNil(f)
+
+	f, err = fs.Open("Porte%20Fermée.txt")
+	assert.NoError(err)
+	assert.NotNil(f)
+
+	f, err = fs.Open("Porte%20Ferm%C3%A9e.txt")
+	assert.NoError(err)
+	assert.NotNil(f)
+}
+
 func TestOpen(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
@@ -126,6 +147,7 @@ func TestReaddir(t *testing.T) {
 				"js",
 				"lots-of-files",
 				"not-a-zip-file.txt",
+				"porte ferm�e.txt",
 				"random.dat",
 				"test.html",
 			},

@@ -6,12 +6,22 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/encoding/korean"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/traditionalchinese"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
 var (
@@ -20,6 +30,42 @@ var (
 	errNotDirectory     = errors.New("not a directory")
 	errDirectory        = errors.New("is a directory")
 )
+
+// List of encoders in order of most common to least common
+// for zips, first one found stops.
+var charmapEncoders []*encoding.Encoder = []*encoding.Encoder{
+	charmap.CodePage437.NewEncoder(),
+	unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewEncoder(),
+	unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM).NewEncoder(),
+	charmap.ISO8859_1.NewEncoder(),
+	charmap.Windows1251.NewEncoder(),
+	charmap.Windows1252.NewEncoder(),
+	japanese.ShiftJIS.NewEncoder(),
+	simplifiedchinese.GBK.NewEncoder(),
+	charmap.ISO8859_8.NewEncoder(),
+	charmap.Windows1254.NewEncoder(),
+	japanese.EUCJP.NewEncoder(),
+	traditionalchinese.Big5.NewEncoder(),
+	simplifiedchinese.HZGB2312.NewEncoder(),
+	korean.EUCKR.NewEncoder(),
+	charmap.Windows874.NewEncoder(),
+	charmap.Windows1250.NewEncoder(),
+	charmap.Windows1253.NewEncoder(),
+	charmap.Windows1255.NewEncoder(),
+	charmap.Windows1256.NewEncoder(),
+	charmap.Windows1257.NewEncoder(),
+	charmap.Windows1258.NewEncoder(),
+	charmap.ISO8859_2.NewEncoder(),
+	charmap.ISO8859_5.NewEncoder(),
+	charmap.ISO8859_7.NewEncoder(),
+	charmap.ISO8859_8.NewEncoder(),
+	japanese.ISO2022JP.NewEncoder(),
+	simplifiedchinese.GB18030.NewEncoder(),
+	charmap.Macintosh.NewEncoder(),
+	charmap.MacintoshCyrillic.NewEncoder(),
+	charmap.CodePage855.NewEncoder(),
+	charmap.CodePage866.NewEncoder(),
+}
 
 // FileSystem is a file system based on a ZIP file.
 // It implements the http.FileSystem interface.
@@ -143,14 +189,47 @@ func (fs *FileSystem) openFileInfo(name string) (*fileInfo, error) {
 	if fs.readerAt == nil {
 		return nil, errFileSystemClosed
 	}
-	name = strings.ToLower(path.Clean(name))
+	name, _ = url.PathUnescape(strings.ToLower(path.Clean(name)))
 	trimmedName := strings.TrimLeft(name, "/")
+
+	//Check if the UTF-8 or ASCII name exists
 	fi := fs.fileInfos[trimmedName]
 	if fi == nil {
-		return nil, &os.PathError{Op: "Open", Path: name, Err: os.ErrNotExist}
+		//Check if any of the other codes exist
+		fi = fs.testAltEncodings(name)
+		//If no Codes still exist, return nil with Error
+		if fi == nil {
+			return nil, &os.PathError{Op: "Open", Path: name, Err: os.ErrNotExist}
+		}
 	}
 
 	return fi, nil
+}
+
+func (fs *FileSystem) testAltEncodings(name string) *fileInfo {
+	for _, enc := range charmapEncoders {
+		strVal, err := transformEncoding(strings.NewReader(name), enc)
+		if err != nil {
+			continue
+		}
+
+		name = strings.ToLower(path.Clean(strVal))
+		fi := fs.fileInfos[name]
+		if fi != nil {
+			return fi
+		}
+	}
+
+	return nil
+}
+
+func transformEncoding(rawReader io.Reader, trans transform.Transformer) (string, error) {
+	ret, err := ioutil.ReadAll(transform.NewReader(rawReader, trans))
+	if err == nil {
+		return string(ret), nil
+	} else {
+		return "", err
+	}
 }
 
 // fileMap keeps track of fileInfos
