@@ -286,7 +286,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 		}
 
 		//Now that we have a file, override the mime-type if it on the list
-		mimeOverride, ok := h.mimeExts[filepath.Ext(path.Base(fi.Name()))]
+		mimeOverride, ok := h.mimeExts[strings.ToLower(filepath.Ext(path.Base(fi.Name())))]
 		if ok {
 			w.Header().Set("Content-Type", mimeOverride)
 		}
