@@ -14,6 +14,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -55,27 +56,29 @@ func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerb
 	return h
 }
 
-func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string, mimeExts map[string]string) http.Handler {
+func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string, mimeExts map[string]string, overrideBases []string) http.Handler {
 	return &fileHandler{
-		baseAPIPath:  baseAPIPath,
-		isVerbose:    isVerbose,
-		urlPrepend:   urlPrepend,
-		indexExts:    indexExts,
-		baseMountDir: baseMountDir,
-		phpPath:      phpPath,
-		mimeExts:     mimeExts,
+		baseAPIPath:   baseAPIPath,
+		isVerbose:     isVerbose,
+		urlPrepend:    urlPrepend,
+		indexExts:     indexExts,
+		baseMountDir:  baseMountDir,
+		phpPath:       phpPath,
+		mimeExts:      mimeExts,
+		overrideBases: overrideBases,
 	}
 }
 
 type fileHandler struct {
-	fs           []*FileSystem
-	baseAPIPath  string
-	isVerbose    bool
-	urlPrepend   string
-	indexExts    []string
-	baseMountDir string
-	phpPath      string
-	mimeExts    map[string]string
+	fs            []*FileSystem
+	baseAPIPath   string
+	isVerbose     bool
+	urlPrepend    string
+	indexExts     []string
+	baseMountDir  string
+	phpPath       string
+	mimeExts      map[string]string
+	overrideBases []string
 }
 
 type Mount struct {
@@ -245,12 +248,6 @@ func (h *fileHandler) ListMountedFs(w http.ResponseWriter, r *http.Request) {
 func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name string, redirect bool, phpPath string) {
 	//If a file is attempting to be served, but no zips are available
 	//We want to fail gracefully.
-	if len(h.fs) == 0 {
-		fmt.Printf("Error (serveFiles): File not found, no ZIP is added.\n")
-		http.Error(w, "File not found, no ZIP is added.", http.StatusNotFound)
-		return
-	}
-
 	const indexPage = "/index.html"
 
 	// redirect .../index.html to .../
@@ -269,7 +266,71 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 	var errCode int
 	var errFlag = false
 
-	//Loop through the files in order to find the first match
+	// Check for file overrides
+	for _, overrideBase := range h.overrideBases {
+		cleanName, _ := url.PathUnescape(strings.ToLower(path.Clean(name)))
+		trimmedName := strings.TrimLeft(cleanName, "/")
+		// Remove content prefix, not needed when querying local files
+		if strings.HasPrefix(trimmedName, "content/") {
+			trimmedName = trimmedName[len("content/"):]
+		}
+
+		localFile := path.Join(overrideBase, trimmedName)
+
+		stats, err := os.Stat(localFile)
+		if err != nil {
+			continue
+		}
+
+		var foundFile *os.File = nil
+
+		if stats.IsDir() {
+			for _, extension := range h.indexExts {
+				// use contents of index.html for directory, if present
+				index := path.Join(strings.TrimPrefix(localFile, "/"), "/index."+extension)
+				fmt.Printf("NEWINDEX = %s", index)
+				file, err := os.Open(index)
+				if err == nil {
+					foundFile = file
+					defer foundFile.Close()
+					break
+				}
+			}
+		} else {
+			file, err := os.Open(localFile)
+			if err == nil {
+				foundFile = file
+				defer foundFile.Close()
+			}
+		}
+
+		// Found a file, return it
+		if foundFile != nil {
+			//Now that we have a file, override the mime-type if it on the list
+			mimeOverride, ok := h.mimeExts[strings.ToLower(filepath.Ext(path.Base(foundFile.Name())))]
+			if ok {
+				w.Header().Set("Content-Type", mimeOverride)
+			}
+
+			// serveContent will check modification time and ETag
+			w.Header().Set("ZIPSVR_FILENAME", foundFile.Name())
+			stats, err := os.Stat(foundFile.Name())
+			if err != nil {
+				continue
+			}
+			fmt.Printf("Serving override file: %s\n", foundFile.Name())
+			http.ServeContent(w, r, foundFile.Name(), stats.ModTime(), foundFile)
+			return
+		}
+	}
+
+	if len(h.fs) == 0 {
+		fmt.Printf("Error (serveFiles): File not found, no ZIP is added.\n")
+		http.Error(w, "File not found, no ZIP is added.", http.StatusNotFound)
+		return
+	}
+
+	// Loop through the files in order to find the first match
 	for _, fse := range h.fs {
 		errFlag = false
 		errVal = nil
