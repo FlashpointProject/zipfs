@@ -28,7 +28,7 @@ import (
 // It provides slightly better performance than the
 // http.FileServer implementation because it serves compressed content
 // to clients that can accept the "deflate" compression algorithm.
-func FileServer(fs *FileSystem, baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string) http.Handler {
+func FileServer(fs *FileSystem, baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, mimeExts map[string]string) http.Handler {
 	fsVal := []*FileSystem{fs}
 	h := &fileHandler{
 		fs:          fsVal,
@@ -36,24 +36,26 @@ func FileServer(fs *FileSystem, baseAPIPath string, urlPrepend string, isVerbose
 		isVerbose:   isVerbose,
 		urlPrepend:  urlPrepend,
 		indexExts:   indexExts,
+		mimeExts:    mimeExts,
 	}
 
 	return h
 }
 
-func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string) http.Handler {
+func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, mimeExts map[string]string) http.Handler {
 	h := &fileHandler{
 		fs:          fs,
 		baseAPIPath: baseAPIPath,
 		isVerbose:   isVerbose,
 		urlPrepend:  urlPrepend,
 		indexExts:   indexExts,
+		mimeExts:    mimeExts,
 	}
 
 	return h
 }
 
-func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string) http.Handler {
+func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string, mimeExts map[string]string) http.Handler {
 	return &fileHandler{
 		baseAPIPath:  baseAPIPath,
 		isVerbose:    isVerbose,
@@ -61,6 +63,7 @@ func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, inde
 		indexExts:    indexExts,
 		baseMountDir: baseMountDir,
 		phpPath:      phpPath,
+		mimeExts:     mimeExts,
 	}
 }
 
@@ -72,6 +75,7 @@ type fileHandler struct {
 	indexExts    []string
 	baseMountDir string
 	phpPath      string
+	mimeExts    map[string]string
 }
 
 type Mount struct {
@@ -324,9 +328,22 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 			continue
 		}
 
+		//Now that we have a file, override the mime-type if it on the list
+		mimeOverride, ok := h.mimeExts[strings.ToLower(filepath.Ext(path.Base(fi.Name())))]
+		if ok {
+			w.Header().Set("Content-Type", mimeOverride)
+		}
+
 		// serveContent will check modification time and ETag
 		w.Header().Set("ZIPSVR_FILENAME", fi.name)
-		serveContent(w, r, fsVal, fi, phpPath)
+
+		//If the default value exists, send it over to be used, otherwise use default functionality.
+		mimeDefaultOverride, defExists := h.mimeExts["default"]
+		if defExists {
+			serveContent(w, r, fsVal, fi, phpPath, &mimeDefaultOverride)
+		} else {
+			serveContent(w, r, fsVal, fi, phpPath, nil)
+		}
 		return
 	}
 
@@ -336,7 +353,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 	}
 }
 
-func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo, phpPath string) {
+func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo, phpPath string, defaultMime *string) {
 	if checkLastModified(w, r, fi.ModTime()) {
 		return
 	}
@@ -358,7 +375,7 @@ func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fi
 		return
 	}
 
-	setContentType(w, fi.Name())
+	setContentType(w, fi.Name(), defaultMime)
 
 	switch fi.zipFile.Method {
 	case zip.Deflate:
@@ -474,20 +491,27 @@ func serveDeflate(w http.ResponseWriter, r *http.Request, fi *fileInfo, readerAt
 	}
 }
 
-func setContentType(w http.ResponseWriter, filename string) {
+func setContentType(w http.ResponseWriter, filename string, defaultMime *string) {
 	ctypes, haveType := w.Header()["Content-Type"]
 	var ctype string
+
 	if !haveType {
 		ctype = mime.TypeByExtension(filepath.Ext(path.Base(filename)))
 		if ctype == "" {
 			// the standard library sniffs content to decide whether it is
 			// binary or text, but this requires a ReaderSeeker, and we
 			// only have a reader from the zip file. Assume binary.
-			ctype = "application/octet-stream"
+			// unless the default mime is overridden, then use that!
+			if defaultMime == nil {
+				ctype = "application/octet-stream"
+			} else {
+				ctype = *defaultMime
+			}
 		}
 	} else if len(ctypes) > 0 {
 		ctype = ctypes[0]
 	}
+
 	if ctype != "" {
 		w.Header().Set("Content-Type", ctype)
 	}
