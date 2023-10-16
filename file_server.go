@@ -212,6 +212,10 @@ func (h *fileHandler) UnMountFs(w http.ResponseWriter, r *http.Request) {
 	for i := len(h.fs) - 1; i >= 0; i-- {
 		if h.fs[i].givenPath == zipPath {
 			found = true
+			err := h.fs[i].Close()
+			if err != nil {
+				fmt.Printf("Failed to close zip file %s: %s\n", zipPath, err)
+			}
 			h.fs = append(h.fs[:i], h.fs[i+1:]...)
 		}
 	}
@@ -325,7 +329,6 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 	}
 
 	if len(h.fs) == 0 {
-		fmt.Printf("Error (serveFiles): File not found, no ZIP is added.\n")
 		http.Error(w, "File not found, no ZIP is added.", http.StatusNotFound)
 		return
 	}
