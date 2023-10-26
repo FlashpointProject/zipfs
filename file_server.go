@@ -20,8 +20,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/kiancyc/gophp"
 )
 
 // FileServer returns a HTTP handler that serves
@@ -292,7 +290,6 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 			for _, extension := range h.indexExts {
 				// use contents of index.html for directory, if present
 				index := path.Join(strings.TrimPrefix(localFile, "/"), "/index."+extension)
-				fmt.Printf("NEWINDEX = %s", index)
 				file, err := os.Open(index)
 				if err == nil {
 					foundFile = file
@@ -374,7 +371,6 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 			for _, extension := range h.indexExts {
 				// use contents of index.html for directory, if present
 				index := path.Join(strings.TrimPrefix(name, "/"), "/index."+extension)
-				fmt.Printf("NEWINDEX = %s", index)
 				fii, err := fsVal.openFileInfo(index)
 				if err == nil {
 					fi = fii
@@ -468,7 +464,7 @@ func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath
 			return
 		}
 
-		gophp.Cgi(w, r, phpPath, f.file.Name())
+		Cgi(w, r, phpPath, f.file.Name())
 		return
 	}
 
