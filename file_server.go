@@ -54,7 +54,7 @@ func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerb
 	return h
 }
 
-func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string, mimeExts map[string]string, overrideBases []string) http.Handler {
+func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string, mimeExts map[string]string, overrideBases []string, htdocsPath string) http.Handler {
 	return &fileHandler{
 		baseAPIPath:   baseAPIPath,
 		isVerbose:     isVerbose,
@@ -64,6 +64,7 @@ func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, inde
 		phpPath:       phpPath,
 		mimeExts:      mimeExts,
 		overrideBases: overrideBases,
+		htdocsPath:    htdocsPath,
 	}
 }
 
@@ -77,6 +78,7 @@ type fileHandler struct {
 	phpPath       string
 	mimeExts      map[string]string
 	overrideBases []string
+	htdocsPath    string
 }
 
 type Mount struct {
@@ -161,6 +163,55 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Error (MountFs): %s\n", fpErr.Error())
 		http.Error(w, fpErr.Error(), http.StatusNotFound)
 		return
+	}
+
+	// Find all files ending with a script extension and copy them to htdocs - Assists with file related PHP calls to other PHP files
+	count := 0
+	for _, f := range newFS.fileInfos {
+		if checkForPhp(f.name) {
+			extractPath := path.Clean(path.Join(h.htdocsPath, strings.TrimLeft(f.name, "content/")))
+			if h.isVerbose {
+				fmt.Printf("Extracting PHP file: %s\n", extractPath)
+			}
+
+			// Create the destination directory
+			err := os.MkdirAll(filepath.Dir(extractPath), os.ModePerm)
+			if err != nil {
+				fmt.Printf("Error (MountFs): %s\n", err.Error())
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			// Open the file to write to
+			outFile, err := os.Create(extractPath)
+			if err != nil {
+				fmt.Printf("Error (MountFs) - Failed to make HTDOCS Folder: %s\n", err.Error())
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer outFile.Close()
+
+			// Open PHP file from Zip and copy
+			reader, err := f.zipFile.Open()
+			if err != nil {
+				fmt.Printf("Error (MountFs) - Failed to open Zipped file content: %s\n", err.Error())
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer reader.Close()
+
+			_, err = io.Copy(outFile, reader)
+			if err != nil {
+				fmt.Printf("Error (MountFs) - Failed to copy Zipped file content: %s\n", err.Error())
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			count++
+		}
+	}
+	if count > 0 {
+		fmt.Printf("Extracted %d PHP files to %s\n", count, h.htdocsPath)
 	}
 
 	if h.isVerbose {
@@ -400,9 +451,9 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 		//If the default value exists, send it over to be used, otherwise use default functionality.
 		mimeDefaultOverride, defExists := h.mimeExts["default"]
 		if defExists {
-			serveContent(w, r, fsVal, fi, phpPath, &mimeDefaultOverride)
+			serveContent(w, r, fsVal, fi, phpPath, h.htdocsPath, &mimeDefaultOverride)
 		} else {
-			serveContent(w, r, fsVal, fi, phpPath, nil)
+			serveContent(w, r, fsVal, fi, phpPath, h.htdocsPath, nil)
 		}
 		return
 	}
@@ -413,7 +464,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 	}
 }
 
-func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo, phpPath string, defaultMime *string) {
+func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo, phpPath string, htdocsPath string, defaultMime *string) {
 	if checkLastModified(w, r, fi.ModTime()) {
 		return
 	}
@@ -441,30 +492,25 @@ func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fi
 	case zip.Deflate:
 		fallthrough
 	case zip.Store:
-		serveIdentity(w, r, fi, phpPath)
+		serveIdentity(w, r, fi, phpPath, htdocsPath)
 	default:
 		http.Error(w, fmt.Sprintf("unsupported zip method: %d", fi.zipFile.Method), http.StatusInternalServerError)
 	}
 }
 
 // serveIdentity serves a zip file in identity content encoding .
-func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath string) {
+func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath string, htdocsPath string) {
 	// TODO: need to check if the client explicitly refuses to accept
 	// identity encoding (Accept-Encoding: identity;q=0), but this is
 	// going to be very rare.
 
 	// Divert php requests
 	if phpPath != "" && checkForPhp(fi.name) {
-		f := fi.openReader(r.URL.Path)
-		defer f.Close()
-		err := f.createTempFile()
-		if err != nil {
-			fmt.Println(err.Error())
-			http.Error(w, "Error unpacking php file", http.StatusInternalServerError)
-			return
-		}
-
-		Cgi(w, r, phpPath, f.file.Name())
+		fileName := strings.TrimLeft(fi.name, "content/")
+		// Run the file from the htdocs directory instead
+		htdocsFile := path.Clean(path.Join(htdocsPath, fileName))
+		fmt.Printf("Executing PHP Script: %s\n", fileName)
+		Cgi(w, r, phpPath, htdocsFile)
 		return
 	}
 
@@ -483,11 +529,12 @@ func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath
 	if r.Method != "HEAD" {
 		io.CopyN(w, reader, size)
 	}
+	fmt.Printf("Serving Zipped File: %s\n", zf.Name)
 }
 
 // serveDeflat serves a zip file in deflate content-encoding if the
 // user agent can accept it. Otherwise it calls serveIdentity.
-func serveDeflate(w http.ResponseWriter, r *http.Request, fi *fileInfo, readerAt io.ReaderAt, phpPath string) {
+func serveDeflate(w http.ResponseWriter, r *http.Request, fi *fileInfo, readerAt io.ReaderAt, phpPath string, htdocsPath string) {
 	acceptEncoding := r.Header.Get("Accept-Encoding")
 
 	// TODO: need to parse the accept header to work out if the
@@ -495,7 +542,7 @@ func serveDeflate(w http.ResponseWriter, r *http.Request, fi *fileInfo, readerAt
 	acceptsDeflate := strings.Contains(acceptEncoding, "deflate")
 	if !acceptsDeflate {
 		// client will not accept deflate, so serve as identity
-		serveIdentity(w, r, fi, phpPath)
+		serveIdentity(w, r, fi, phpPath, htdocsPath)
 		return
 	}
 
