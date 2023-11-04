@@ -529,7 +529,7 @@ func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath
 	if r.Method != "HEAD" {
 		io.CopyN(w, reader, size)
 	}
-	fmt.Printf("Serving Zipped File: %s\n", zf.Name)
+	fmt.Printf("[Zipfs] Serving Zipped File: %s\n", zf.Name)
 }
 
 // serveDeflat serves a zip file in deflate content-encoding if the
