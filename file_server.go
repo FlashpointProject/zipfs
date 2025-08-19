@@ -82,7 +82,16 @@ type fileHandler struct {
 }
 
 type Mount struct {
-	FilePath string `json:"filePath"`
+	FilePath    *string      `json:"filePath"`
+	ArchiveData *ArchiveData `json:"archiveData"`
+}
+
+type ArchiveData struct {
+	FilePath          string `json:"filePath"`
+	CompressionMethod int16  `json:"compressionMethod"`
+	Offset            int64  `json:"offset"`
+	CompressedLength  int64  `json:"compressedLength"`
+	Length            int64  `json:"length"`
 }
 
 type MountList struct {
@@ -132,37 +141,58 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ensure the zip is within the base directory
-	var zipPath string
-	if filepath.IsAbs(m.FilePath) {
-		zipPath = path.Clean(m.FilePath)
-	} else {
-		zipPath = path.Join(h.baseMountDir, m.FilePath)
-		zipPath = path.Clean(zipPath)
-	}
-	if !strings.HasPrefix(zipPath, h.baseMountDir) {
-		fmt.Printf("Error (MountFs): Illegal path access (%s) %s", m.FilePath, zipPath)
-		http.Error(w, "Illegal path access", http.StatusBadRequest)
-		return
-	}
+	var newFS *FileSystem
 
-	// Prevent duplicate mounts
-	for _, fse := range h.fs {
-		if fse.givenPath == zipPath {
-			fmt.Printf("Error (MountFs): Zip already mounted (%s) %s", m.FilePath, zipPath)
-			makeJsonResponse(w, SimpleResponseData{
-				Message: "Zip file already mounted!",
-			}, http.StatusOK)
+	if m.FilePath != nil {
+		// Ensure the zip is within the base directory
+		var zipPath string
+		if filepath.IsAbs(*m.FilePath) {
+			zipPath = path.Clean(*m.FilePath)
+		} else {
+			zipPath = path.Join(h.baseMountDir, *m.FilePath)
+			zipPath = path.Clean(zipPath)
+		}
+		if !strings.HasPrefix(zipPath, h.baseMountDir) {
+			fmt.Printf("Error (MountFs): Illegal path access (%s) %s", m.FilePath, zipPath)
+			http.Error(w, "Illegal path access", http.StatusBadRequest)
 			return
 		}
-	}
 
-	fmt.Printf("Mounting Zip: %s\n", zipPath)
-	newFS, fpErr := New(zipPath)
-	if fpErr != nil {
-		fmt.Printf("Error (MountFs): %s\n", fpErr.Error())
-		http.Error(w, fpErr.Error(), http.StatusNotFound)
-		return
+		// Prevent duplicate mounts
+		for _, fse := range h.fs {
+			if fse.givenPath == zipPath {
+				fmt.Printf("Error (MountFs Zip): Zip already mounted (%s) %s", m.FilePath, zipPath)
+				makeJsonResponse(w, SimpleResponseData{
+					Message: "Zip file already mounted!",
+				}, http.StatusOK)
+				return
+			}
+		}
+
+		fmt.Printf("Mounting Zip: %s\n", zipPath)
+		var fpErr error
+		newFS, fpErr = New(zipPath)
+		if fpErr != nil {
+			fmt.Printf("Error (MountFs Zip): %s\n", fpErr.Error())
+			http.Error(w, fpErr.Error(), http.StatusNotFound)
+			return
+		}
+
+		if h.isVerbose {
+			fmt.Printf("Zip Mounted: %s\n", zipPath)
+		}
+	} else if m.ArchiveData != nil {
+		var fpErr error
+		newFS, fpErr = NewArchiveData(*m.ArchiveData)
+		if fpErr != nil {
+			fmt.Printf("Error (MountFs Archive): %s\n", fpErr.Error())
+			http.Error(w, fpErr.Error(), http.StatusNotFound)
+			return
+		}
+
+		if h.isVerbose {
+			fmt.Printf("Archive Zip Mounted: %s\n", m.ArchiveData.FilePath)
+		}
 	}
 
 	// Find all files ending with a script extension and copy them to htdocs - Assists with file related PHP calls to other PHP files
@@ -214,15 +244,10 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Extracted %d PHP files to %s\n", count, h.htdocsPath)
 	}
 
-	if h.isVerbose {
-		fmt.Printf("Zip Mounted: %s\n", zipPath)
-	}
-
 	h.fs = append(h.fs, newFS)
 	makeJsonResponse(w, SimpleResponseData{
 		Message: "Zip file mounted!",
 	}, http.StatusOK)
-	return
 }
 
 // Remove a ZIP file at runtime.
@@ -243,10 +268,10 @@ func (h *fileHandler) UnMountFs(w http.ResponseWriter, r *http.Request) {
 
 	// Ensure the zip is within the base directory
 	var zipPath string
-	if filepath.IsAbs(m.FilePath) {
-		zipPath = path.Clean(m.FilePath)
+	if filepath.IsAbs(*m.FilePath) {
+		zipPath = path.Clean(*m.FilePath)
 	} else {
-		zipPath = path.Join(h.baseMountDir, m.FilePath)
+		zipPath = path.Join(h.baseMountDir, *m.FilePath)
 		zipPath = path.Clean(zipPath)
 	}
 	if !strings.HasPrefix(zipPath, h.baseMountDir) {
@@ -276,7 +301,6 @@ func (h *fileHandler) UnMountFs(w http.ResponseWriter, r *http.Request) {
 	makeJsonResponse(w, SimpleResponseData{
 		Message: "Zip file unmounted!",
 	}, http.StatusOK)
-	return
 }
 
 // Remove a ZIP file at runtime.
@@ -294,7 +318,6 @@ func (h *fileHandler) ListMountedFs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ml)
-	return
 }
 
 // name is '/'-separated, not filepath.Separator.

@@ -3,6 +3,7 @@ package zipfs
 import (
 	"archive/zip"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -90,6 +91,32 @@ func New(name string) (*FileSystem, error) {
 		return nil, err
 	}
 	return NewFromReaderAt(file, fi.Size(), file, name)
+}
+
+func NewArchiveData(archiveData ArchiveData) (*FileSystem, error) {
+	// Open the file containing the archive data
+	file, err := os.Open(archiveData.FilePath)
+	if err != nil {
+		return nil, err
+	}
+
+	if archiveData.CompressionMethod != 0 {
+		return nil, fmt.Errorf("only 'store' is supported for file compression method")
+	}
+
+	sectionReader := io.NewSectionReader(file, archiveData.Offset, archiveData.CompressedLength)
+
+	// Create a custom reader that implements the necessary interfaces for ZIP reading
+	zipData := &archiveDataReader{
+		reader:            sectionReader,
+		compressionMethod: archiveData.CompressionMethod,
+		compressedSize:    archiveData.CompressedLength,
+		uncompressedSize:  archiveData.Length,
+		file:              file,
+	}
+
+	// Use the existing NewFromReaderAt function to create the FileSystem
+	return NewFromReaderAt(zipData, archiveData.CompressedLength, file, archiveData.FilePath)
 }
 
 // NewFromReaderAt will open the Zip file accessible by readerAt with the given size.
@@ -501,4 +528,30 @@ func createTempFile(f *zip.File) (*os.File, error) {
 	}
 
 	return tempFile, nil
+}
+
+type archiveDataReader struct {
+	reader            *io.SectionReader
+	compressionMethod int16
+	compressedSize    int64
+	uncompressedSize  int64
+	file              *os.File
+}
+
+func (a *archiveDataReader) ReadAt(p []byte, off int64) (n int, err error) {
+	// Keep within bounds of file
+	if off >= a.compressedSize {
+		return 0, io.EOF
+	}
+
+	if off+int64(len(p)) > a.compressedSize {
+		p = p[:a.compressedSize-off]
+	}
+
+	return a.reader.ReadAt(p, off)
+}
+
+// Close implements io.Closer
+func (a *archiveDataReader) Close() error {
+	return a.file.Close()
 }
