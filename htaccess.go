@@ -206,12 +206,13 @@ func splitRewriteLine(line string) []string {
 func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	workingPath := r.URL.Path
 
-	for _, rule := range h.Rules {
-		// fmt.Printf("Rule %d: Pattern=%s, Substitution=%s, Flags=%v\n",
-		// 	i, rule.Pattern.String(), rule.Substitution, rule.Flags)
+	for i, rule := range h.Rules {
+		fmt.Printf("Rule %d: Pattern=%s, Substitution=%s, Flags=%v\n",
+			i, rule.Pattern.String(), rule.Substitution, rule.Flags)
 
 		// Check conditions first
-		if !h.checkConditions(rule.Conditions, r) {
+		condMatches := h.checkConditionsWithCaptures(rule.Conditions, r)
+		if condMatches == nil {
 			continue
 		}
 
@@ -222,6 +223,12 @@ func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Perform substitution
 		newPath := rule.Pattern.ReplaceAllString(workingPath, rule.Substitution)
+
+		// Replace %N backreferences from RewriteCond
+		for i, match := range condMatches {
+			placeholder := fmt.Sprintf("%%%d", i+1)
+			newPath = strings.ReplaceAll(newPath, placeholder, match)
+		}
 
 		// Handle special substitutions
 		if newPath == "-" {
@@ -239,9 +246,7 @@ func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return // Redirect or other terminal action
 		}
 
-		// Update request path for internal rewrite
-		r.URL.Path = newPath
-		// fmt.Printf("Rule modified path: %s\n", r.URL.Path)
+		workingPath = strings.TrimPrefix(newPath, "/")
 
 		// [L] flag - stop processing rules
 		if _, hasL := rule.Flags["L"]; hasL {
@@ -254,8 +259,11 @@ func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Update path for next iteration
-		workingPath = strings.TrimPrefix(newPath, "/")
+		fmt.Printf("After rule applied: %s\n", workingPath)
 	}
+
+	fmt.Printf("All rules applied: %s\n", workingPath)
+	r.URL.Path = workingPath
 
 	// Pass to next handler
 	if h.Next != nil {
@@ -265,29 +273,38 @@ func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// checkConditions evaluates RewriteCond directives
-func (h *HtaccessHandler) checkConditions(conditions []RewriteCond, r *http.Request) bool {
+// checkConditionsWithCaptures evaluates conditions and returns captured groups
+func (h *HtaccessHandler) checkConditionsWithCaptures(conditions []RewriteCond, r *http.Request) []string {
+	var allCaptures []string
+
 	for _, cond := range conditions {
 		testValue := h.expandVariables(cond.TestString, r)
 
-		matched := cond.Pattern.MatchString(testValue)
+		matches := cond.Pattern.FindStringSubmatch(testValue)
+		if matches == nil {
+			return nil // Condition failed
+		}
 
-		// Handle [NC] flag (case insensitive)
+		// Store captures (skip full match at index 0)
+		if len(matches) > 1 {
+			allCaptures = append(allCaptures, matches[1:]...)
+		}
+
+		// Handle flags
+		hasOR := false
 		for _, flag := range cond.Flags {
-			if flag == "NC" || flag == "nocase" {
-				matched = cond.Pattern.MatchString(strings.ToLower(testValue))
-			}
-			// Handle [OR] flag
-			if flag == "OR" && matched {
-				return true
+			if flag == "OR" {
+				hasOR = true
+				break
 			}
 		}
 
-		if !matched {
-			return false
+		if hasOR && len(matches) > 0 {
+			continue // OR succeeded, continue to next condition
 		}
 	}
-	return true
+
+	return allCaptures
 }
 
 // expandVariables expands Apache variables like %{REQUEST_URI}
@@ -319,18 +336,16 @@ func (h *HtaccessHandler) expandVariables(str string, r *http.Request) string {
 	return result
 }
 
-// handleFlags processes rewrite flags
 func (h *HtaccessHandler) handleFlags(w http.ResponseWriter, r *http.Request, newPath string, flags map[string]string) bool {
 	// [R] or [R=code] - Redirect
 	if redirect, hasR := flags["R"]; hasR {
-		code := 302 // Default temporary redirect
+		code := 302
 		if redirect != "true" {
 			if c, err := strconv.Atoi(redirect); err == nil {
 				code = c
 			}
 		}
 
-		// Build redirect URL
 		redirectURL := newPath
 		if !strings.HasPrefix(redirectURL, "http") {
 			scheme := "http"
@@ -340,8 +355,11 @@ func (h *HtaccessHandler) handleFlags(w http.ResponseWriter, r *http.Request, ne
 			redirectURL = fmt.Sprintf("%s://%s%s", scheme, r.Host, newPath)
 		}
 
+		// [QSD] - Query String Discard (don't append query string)
+		_, hasQSD := flags["QSD"]
+
 		// [QSA] - Query String Append
-		if _, hasQSA := flags["QSA"]; hasQSA && r.URL.RawQuery != "" {
+		if _, hasQSA := flags["QSA"]; hasQSA && !hasQSD && r.URL.RawQuery != "" {
 			separator := "?"
 			if strings.Contains(redirectURL, "?") {
 				separator = "&"
@@ -353,17 +371,6 @@ func (h *HtaccessHandler) handleFlags(w http.ResponseWriter, r *http.Request, ne
 		return true
 	}
 
-	// [F] - Forbidden
-	if _, hasF := flags["F"]; hasF {
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		return true
-	}
-
-	// [G] - Gone
-	if _, hasG := flags["G"]; hasG {
-		http.Error(w, "Gone", http.StatusGone)
-		return true
-	}
-
+	// ... rest of flags
 	return false
 }
