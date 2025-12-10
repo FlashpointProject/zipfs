@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -69,16 +70,18 @@ func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, inde
 }
 
 type fileHandler struct {
-	fs            []*FileSystem
-	baseAPIPath   string
-	isVerbose     bool
-	urlPrepend    string
-	indexExts     []string
-	baseMountDir  string
-	phpPath       string
-	mimeExts      map[string]string
-	overrideBases []string
-	htdocsPath    string
+	fs               []*FileSystem
+	baseAPIPath      string
+	isVerbose        bool
+	urlPrepend       string
+	indexExts        []string
+	baseMountDir     string
+	phpPath          string
+	mimeExts         map[string]string
+	overrideBases    []string
+	htdocsPath       string
+	htaccessHandlers map[string]*HtaccessHandler
+	htaccessMutex    sync.RWMutex
 }
 
 type Mount struct {
@@ -122,7 +125,23 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		upath = "/" + upath
 		r.URL.Path = upath
 	}
-	serveFiles(w, r, h, path.Clean(upath), true, h.phpPath)
+
+	fileServingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// fmt.Printf("File serving - Emulated URL: %s (Host: %s, Path: %s)\n",
+		// 	r.URL.String(), r.URL.Host, r.URL.Path)
+		if !strings.HasPrefix(r.URL.Path, "/content/") {
+			r.URL.Path = "/content" + r.URL.Path
+		}
+		serveFiles(w, r, h, path.Clean(r.URL.Path), true, h.phpPath)
+	})
+
+	htaccessChain := h.GetHtaccessChain(r.URL.Path, fileServingHandler)
+	if htaccessChain != nil {
+		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/content")
+		htaccessChain.ServeHTTP(w, r)
+	} else {
+		fileServingHandler.ServeHTTP(w, r)
+	}
 }
 
 // Add a ZIP file at runtime.
@@ -195,11 +214,93 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	htaccessCount := 0
+	htaccessFiles := make(map[string][]byte)
+
+	for _, f := range newFS.fileInfos {
+		fileName := filepath.Base(f.name)
+
+		if fileName == ".htaccess" {
+			// Read .htaccess content from zip
+			reader, err := f.zipFile.Open()
+			if err != nil {
+				fmt.Printf("Error (MountFs) - Failed to open .htaccess: %s\n", err.Error())
+				continue
+			}
+
+			content, err := io.ReadAll(reader)
+			reader.Close()
+
+			if err != nil {
+				fmt.Printf("Error (MountFs) - Failed to read .htaccess: %s\n", err.Error())
+				continue
+			}
+
+			// Get directory path (remove filename)
+			dirPath := filepath.Dir(f.name)
+			// Normalize path (remove "content/" prefix if present)
+			dirPath = strings.TrimPrefix(dirPath, "content\\")
+			dirPath = strings.TrimPrefix(dirPath, "\\")
+
+			htaccessFiles[dirPath] = content
+			htaccessCount++
+
+			if h.isVerbose {
+				fmt.Printf("Found .htaccess in: %s\n", dirPath)
+			}
+		}
+	}
+
+	// Parse .htaccess files and create handlers
+	if htaccessCount > 0 {
+		h.htaccessMutex.Lock()
+		if h.htaccessHandlers == nil {
+			h.htaccessHandlers = make(map[string]*HtaccessHandler)
+		}
+
+		for dirPath, content := range htaccessFiles {
+			// Write content to temporary file for parsing
+			tmpFile, err := os.CreateTemp("", ".htaccess-*")
+			if err != nil {
+				fmt.Printf("Error (MountFs) - Failed to create temp .htaccess: %s\n", err.Error())
+				continue
+			}
+
+			_, err = tmpFile.Write(content)
+			tmpFile.Close()
+
+			if err != nil {
+				fmt.Printf("Error (MountFs) - Failed to write temp .htaccess: %s\n", err.Error())
+				os.Remove(tmpFile.Name())
+				continue
+			}
+
+			// Parse .htaccess file
+			handler, err := CreateHtaccessHandler(tmpFile.Name(), nil)
+			os.Remove(tmpFile.Name()) // Clean up temp file
+
+			if err != nil {
+				fmt.Printf("Error (MountFs) - Failed to parse .htaccess at %s: %s\n", dirPath, err.Error())
+				continue
+			}
+
+			println("Registering handler to %s", dirPath)
+			h.htaccessHandlers[dirPath] = handler
+
+			if h.isVerbose {
+				fmt.Printf("Parsed .htaccess for: %s (%d rules)\n", dirPath, len(handler.Rules))
+			}
+		}
+
+		h.htaccessMutex.Unlock()
+		fmt.Printf("Loaded %d .htaccess files\n", htaccessCount)
+	}
+
 	// Find all files ending with a script extension and copy them to htdocs - Assists with file related PHP calls to other PHP files
 	count := 0
 	for _, f := range newFS.fileInfos {
 		if checkForPhp(f.name) {
-			extractPath := path.Clean(path.Join(h.htdocsPath, strings.TrimLeft(f.name, "content/")))
+			extractPath := path.Clean(path.Join(h.htdocsPath, strings.TrimPrefix(f.name, "content/")))
 			if h.isVerbose {
 				fmt.Printf("Extracting PHP file: %s\n", extractPath)
 			}
@@ -320,6 +421,56 @@ func (h *fileHandler) ListMountedFs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(ml)
 }
 
+func (h *fileHandler) GetHtaccessChain(requestPath string, finalHandler http.Handler) http.Handler {
+	// println("Building request handler for ", requestPath)
+	requestPath = strings.TrimPrefix(requestPath, "/content/")
+	// println("Matching ", requestPath)
+	h.htaccessMutex.RLock()
+	defer h.htaccessMutex.RUnlock()
+
+	if len(h.htaccessHandlers) == 0 {
+		return finalHandler // No .htaccess, return final handler directly
+	}
+
+	// Find all .htaccess files that apply to this path
+	var applicablePaths []string
+
+	parts := strings.Split(requestPath, "/")
+	currentPath := ""
+	applicablePaths = append(applicablePaths, currentPath)
+
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		currentPath = filepath.Join(currentPath, part)
+		applicablePaths = append(applicablePaths, currentPath)
+	}
+
+	// Collect handlers that exist for these paths
+	var handlers []*HtaccessHandler
+	for _, p := range applicablePaths {
+		if handler, exists := h.htaccessHandlers[p]; exists {
+			handlers = append(handlers, handler)
+		}
+	}
+
+	if len(handlers) == 0 {
+		return finalHandler // No applicable .htaccess, return final handler
+	}
+
+	// Chain handlers from deepest to root, with finalHandler at the end
+	chainedHandler := finalHandler
+	for i := len(handlers) - 1; i >= 0; i-- {
+		// Clone the handler to avoid modifying the cached one
+		handlerCopy := *handlers[i]
+		handlerCopy.Next = chainedHandler
+		chainedHandler = &handlerCopy
+	}
+
+	return chainedHandler
+}
+
 // name is '/'-separated, not filepath.Separator.
 func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name string, redirect bool, phpPath string) {
 	//If a file is attempting to be served, but no zips are available
@@ -347,9 +498,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 		cleanName, _ := url.PathUnescape(strings.ToLower(path.Clean(name)))
 		trimmedName := strings.TrimLeft(cleanName, "/")
 		// Remove content prefix, not needed when querying local files
-		if strings.HasPrefix(trimmedName, "content/") {
-			trimmedName = trimmedName[len("content/"):]
-		}
+		trimmedName = strings.TrimPrefix(trimmedName, "content/")
 
 		localFile := path.Join(overrideBase, trimmedName)
 
@@ -529,7 +678,7 @@ func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath
 
 	// Divert php requests
 	if phpPath != "" && checkForPhp(fi.name) {
-		fileName := strings.TrimLeft(fi.name, "content/")
+		fileName := strings.TrimPrefix(fi.name, "content/")
 		// Run the file from the htdocs directory instead
 		htdocsFile := path.Clean(path.Join(htdocsPath, fileName))
 		fmt.Printf("Executing PHP Script: %s\n", fileName)
@@ -553,72 +702,6 @@ func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath
 		io.CopyN(w, reader, size)
 	}
 	fmt.Printf("[Zipfs] Serving Zipped File: %s\n", zf.Name)
-}
-
-// serveDeflat serves a zip file in deflate content-encoding if the
-// user agent can accept it. Otherwise it calls serveIdentity.
-func serveDeflate(w http.ResponseWriter, r *http.Request, fi *fileInfo, readerAt io.ReaderAt, phpPath string, htdocsPath string) {
-	acceptEncoding := r.Header.Get("Accept-Encoding")
-
-	// TODO: need to parse the accept header to work out if the
-	// client is explicitly forbidding deflate (ie deflate;q=0)
-	acceptsDeflate := strings.Contains(acceptEncoding, "deflate")
-	if !acceptsDeflate {
-		// client will not accept deflate, so serve as identity
-		serveIdentity(w, r, fi, phpPath, htdocsPath)
-		return
-	}
-
-	f := fi.zipFile
-	contentLength := int64(f.CompressedSize64)
-	if contentLength == 0 {
-		contentLength = int64(f.CompressedSize64)
-	}
-	w.Header().Set("Content-Encoding", "deflate")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", contentLength))
-	if r.Method == "HEAD" {
-		return
-	}
-
-	var written int64
-	remaining := contentLength
-	offset, err := f.DataOffset()
-	if err != nil {
-		msg, code := toHTTPError(err)
-		http.Error(w, msg, code)
-		return
-	}
-
-	// re-use buffers to reduce stress on GC
-	buf := bufPool.Get()
-	defer bufPool.Free(buf)
-
-	// loop to write the raw deflated content to the client
-	for remaining > 0 {
-		size := len(buf)
-		if int64(size) > remaining {
-			size = int(remaining)
-		}
-
-		b := buf[:size]
-		_, err := readerAt.ReadAt(b, offset)
-		if err != nil {
-			if written == 0 {
-				// have not written anything to the client yet, so we can send an error
-				msg, code := toHTTPError(err)
-				http.Error(w, msg, code)
-			}
-			return
-		}
-		if _, err := w.Write(b); err != nil {
-			// Cannot write an error to the client because, er,  we just
-			// failed to write to the client.
-			return
-		}
-		written += int64(size)
-		remaining -= int64(size)
-		offset += int64(size)
-	}
 }
 
 func setContentType(w http.ResponseWriter, filename string, defaultMime *string) {
