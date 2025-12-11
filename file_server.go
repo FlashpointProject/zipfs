@@ -172,7 +172,7 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 			zipPath = path.Clean(zipPath)
 		}
 		if !strings.HasPrefix(zipPath, h.baseMountDir) {
-			fmt.Printf("Error (MountFs): Illegal path access (%s) %s", m.FilePath, zipPath)
+			fmt.Printf("Error (MountFs): Illegal path access (%s) %s", *m.FilePath, zipPath)
 			http.Error(w, "Illegal path access", http.StatusBadRequest)
 			return
 		}
@@ -180,7 +180,7 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 		// Prevent duplicate mounts
 		for _, fse := range h.fs {
 			if fse.givenPath == zipPath {
-				fmt.Printf("Error (MountFs Zip): Zip already mounted (%s) %s", m.FilePath, zipPath)
+				fmt.Printf("Error (MountFs Zip): Zip already mounted (%s) %s", *m.FilePath, zipPath)
 				makeJsonResponse(w, SimpleResponseData{
 					Message: "Zip file already mounted!",
 				}, http.StatusOK)
@@ -376,7 +376,7 @@ func (h *fileHandler) UnMountFs(w http.ResponseWriter, r *http.Request) {
 		zipPath = path.Clean(zipPath)
 	}
 	if !strings.HasPrefix(zipPath, h.baseMountDir) {
-		fmt.Printf("Error (MountFs): Illegal path access (%s) %s", m.FilePath, zipPath)
+		fmt.Printf("Error (MountFs): Illegal path access (%s) %s", *m.FilePath, zipPath)
 		http.Error(w, "Illegal path access", http.StatusBadRequest)
 		return
 	}
@@ -432,6 +432,14 @@ func (h *fileHandler) GetHtaccessChain(requestPath string, finalHandler http.Han
 		return finalHandler // No .htaccess, return final handler directly
 	}
 
+	return BuildHtaccessChain(h.htaccessHandlers, requestPath, finalHandler)
+}
+
+func BuildHtaccessChain(htaccessHandlers map[string]*HtaccessHandler, requestPath string, finalHandler http.Handler) http.Handler {
+	if len(htaccessHandlers) == 0 {
+		return finalHandler // No .htaccess, return final handler directly
+	}
+
 	// Find all .htaccess files that apply to this path
 	var applicablePaths []string
 
@@ -450,7 +458,7 @@ func (h *fileHandler) GetHtaccessChain(requestPath string, finalHandler http.Han
 	// Collect handlers that exist for these paths
 	var handlers []*HtaccessHandler
 	for _, p := range applicablePaths {
-		if handler, exists := h.htaccessHandlers[p]; exists {
+		if handler, exists := htaccessHandlers[p]; exists {
 			handlers = append(handlers, handler)
 		}
 	}

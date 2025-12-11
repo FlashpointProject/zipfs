@@ -205,10 +205,11 @@ func splitRewriteLine(line string) []string {
 // ServeHTTP implements http.Handler
 func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	workingPath := r.URL.Path
+	// println("Initial path: ", workingPath)
 
-	for i, rule := range h.Rules {
-		fmt.Printf("Rule %d: Pattern=%s, Substitution=%s, Flags=%v\n",
-			i, rule.Pattern.String(), rule.Substitution, rule.Flags)
+	for _, rule := range h.Rules {
+		// fmt.Printf("Rule %d: Pattern=%s, Substitution=%s, Flags=%v\n",
+		// 	i, rule.Pattern.String(), rule.Substitution, rule.Flags)
 
 		// Check conditions first
 		condMatches := h.checkConditionsWithCaptures(rule.Conditions, r)
@@ -222,31 +223,31 @@ func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Perform substitution
-		newPath := rule.Pattern.ReplaceAllString(workingPath, rule.Substitution)
+		workingPath = rule.Pattern.ReplaceAllString(workingPath, rule.Substitution)
 
 		// Replace %N backreferences from RewriteCond
 		for i, match := range condMatches {
 			placeholder := fmt.Sprintf("%%%d", i+1)
-			newPath = strings.ReplaceAll(newPath, placeholder, match)
+			workingPath = strings.ReplaceAll(workingPath, placeholder, match)
 		}
 
 		// Handle special substitutions
-		if newPath == "-" {
+		if workingPath == "-" {
 			// Pass through unchanged
 			continue
 		}
 
 		// Apply RewriteBase if set and path is relative
-		if h.RewriteBase != "" && !strings.HasPrefix(newPath, "/") {
-			newPath = strings.TrimSuffix(h.RewriteBase, "/") + "/" + newPath
+		if h.RewriteBase != "" && !strings.HasPrefix(workingPath, "/") {
+			workingPath = strings.TrimSuffix(h.RewriteBase, "/") + "/" + workingPath
 		}
+
+		workingPath = strings.TrimPrefix(workingPath, "/")
 
 		// Handle flags
-		if h.handleFlags(w, r, newPath, rule.Flags) {
+		if h.handleFlags(w, r, workingPath, rule.Flags) {
 			return // Redirect or other terminal action
 		}
-
-		workingPath = strings.TrimPrefix(newPath, "/")
 
 		// [L] flag - stop processing rules
 		if _, hasL := rule.Flags["L"]; hasL {
@@ -259,10 +260,10 @@ func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Update path for next iteration
-		fmt.Printf("After rule applied: %s\n", workingPath)
+		// fmt.Printf("After rule applied: %s\n", workingPath)
 	}
 
-	fmt.Printf("All rules applied: %s\n", workingPath)
+	// fmt.Printf("All rules applied: %s\n", workingPath)
 	r.URL.Path = workingPath
 
 	// Pass to next handler

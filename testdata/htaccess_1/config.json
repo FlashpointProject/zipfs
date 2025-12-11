@@ -1,0 +1,25 @@
+{
+  "name": "Image URL Query String Rewrites",
+  "htaccess": {
+    "kasane-keyboard.com": "root.htaccess"
+  },
+  "source_curation": "https://fpfss.unstable.life/web/submission/134818",
+  "test_cases": [
+    {
+      "name": "Rewrite next.js static media with query string",
+      "request_url": "http://kasane-keyboard.com/_next/image?url=%2Fimages%2Ffeel-and-play%2Fthumbnails%2Fswitch-linear.webp&w=1200&q=75",
+      "request_method": "GET",
+      "redirect_url": "http://kasane-keyboard.com/_next/imageswitch-linear.webp"
+    },
+    {
+      "name": "Different website URL should pass through",
+      "request_url": "http://site.com/other-page?url=%2Fother%2Fpath.jpg",
+      "request_method": "GET"
+    },
+    {
+      "name": "URL without query string passes through",
+      "request_url": "http://kasane-keyboard.com/page.html",
+      "request_method": "GET"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+RewriteEngine On
+RewriteCond %{QUERY_STRING} ^url=%2F_next%2Fstatic%2Fmedia%2F([^&]*)
+RewriteRule (.*) /$1%1 [QSD,R,L]
+
+RewriteCond %{QUERY_STRING} ^url=%2Fimages%2Fheader%2F([^&]*)
+RewriteRule (.*) /$1%1 [QSD,R,L]
+
+RewriteCond %{QUERY_STRING} ^url=%2Fimages%2Ffeel-and-play%2Fthumbnails%2F([^&]*)
+RewriteRule (.*) /$1%1 [QSD,R,L]
