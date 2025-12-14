@@ -1,0 +1,8 @@
+{
+  "name": "Armorgames Services Rewrite",
+  "htaccess": {
+    "services.armorgames.com": "root.htaccess"
+  },
+  "test_cases": [
+  ]
+}

@@ -1,0 +1,7 @@
+RewriteEngine on
+RewriteBase /services.armorgames.com/
+
+RewriteCond %{HTTP_HOST} ^([^:]+) [NC]
+RewriteCond %{DOCUMENT_ROOT}/%1/$1.php -f [NC]
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.+?)/?$ $1.php [L,NC]

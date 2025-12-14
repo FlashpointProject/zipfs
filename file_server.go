@@ -55,17 +55,18 @@ func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerb
 	return h
 }
 
-func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string, mimeExts map[string]string, overrideBases []string, htdocsPath string) http.Handler {
+func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string, mimeExts map[string]string, extScriptTypes []string, overrideBases []string, htdocsPath string) http.Handler {
 	return &fileHandler{
-		baseAPIPath:   baseAPIPath,
-		isVerbose:     isVerbose,
-		urlPrepend:    urlPrepend,
-		indexExts:     indexExts,
-		baseMountDir:  baseMountDir,
-		phpPath:       phpPath,
-		mimeExts:      mimeExts,
-		overrideBases: overrideBases,
-		htdocsPath:    htdocsPath,
+		baseAPIPath:    baseAPIPath,
+		isVerbose:      isVerbose,
+		urlPrepend:     urlPrepend,
+		indexExts:      indexExts,
+		baseMountDir:   baseMountDir,
+		phpPath:        phpPath,
+		mimeExts:       mimeExts,
+		extScriptTypes: extScriptTypes,
+		overrideBases:  overrideBases,
+		htdocsPath:     htdocsPath,
 	}
 }
 
@@ -78,6 +79,7 @@ type fileHandler struct {
 	baseMountDir     string
 	phpPath          string
 	mimeExts         map[string]string
+	extScriptTypes   []string
 	overrideBases    []string
 	htdocsPath       string
 	htaccessHandlers map[string]*HtaccessHandler
@@ -299,7 +301,7 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 	// Find all files ending with a script extension and copy them to htdocs - Assists with file related PHP calls to other PHP files
 	count := 0
 	for _, f := range newFS.fileInfos {
-		if checkForPhp(f.name) {
+		if checkForPhp(f.name, h.extScriptTypes) {
 			extractPath := path.Clean(path.Join(h.htdocsPath, strings.TrimPrefix(f.name, "content/")))
 			if h.isVerbose {
 				fmt.Printf("Extracting PHP file: %s\n", extractPath)
@@ -631,9 +633,9 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 		//If the default value exists, send it over to be used, otherwise use default functionality.
 		mimeDefaultOverride, defExists := h.mimeExts["default"]
 		if defExists {
-			serveContent(w, r, fsVal, fi, phpPath, h.htdocsPath, &mimeDefaultOverride)
+			serveContent(w, r, fsVal, fi, phpPath, h.htdocsPath, h.extScriptTypes, &mimeDefaultOverride)
 		} else {
-			serveContent(w, r, fsVal, fi, phpPath, h.htdocsPath, nil)
+			serveContent(w, r, fsVal, fi, phpPath, h.htdocsPath, h.extScriptTypes, nil)
 		}
 		return
 	}
@@ -644,7 +646,7 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 	}
 }
 
-func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo, phpPath string, htdocsPath string, defaultMime *string) {
+func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fileInfo, phpPath string, htdocsPath string, extScriptTypes []string, defaultMime *string) {
 	if checkLastModified(w, r, fi.ModTime()) {
 		return
 	}
@@ -672,20 +674,20 @@ func serveContent(w http.ResponseWriter, r *http.Request, fs *FileSystem, fi *fi
 	case zip.Deflate:
 		fallthrough
 	case zip.Store:
-		serveIdentity(w, r, fi, phpPath, htdocsPath)
+		serveIdentity(w, r, fi, phpPath, htdocsPath, extScriptTypes)
 	default:
 		http.Error(w, fmt.Sprintf("unsupported zip method: %d", fi.zipFile.Method), http.StatusInternalServerError)
 	}
 }
 
 // serveIdentity serves a zip file in identity content encoding .
-func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath string, htdocsPath string) {
+func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath string, htdocsPath string, extScriptTypes []string) {
 	// TODO: need to check if the client explicitly refuses to accept
 	// identity encoding (Accept-Encoding: identity;q=0), but this is
 	// going to be very rare.
 
 	// Divert php requests
-	if phpPath != "" && checkForPhp(fi.name) {
+	if phpPath != "" && checkForPhp(fi.name, extScriptTypes) && r.Header.Get("DISABLE_PHP") != "1" {
 		fileName := strings.TrimPrefix(fi.name, "content/")
 		// Run the file from the htdocs directory instead
 		htdocsFile := path.Clean(path.Join(htdocsPath, fileName))
@@ -876,11 +878,9 @@ func makeJsonResponse(w http.ResponseWriter, data interface{}, status int) error
 	return json.NewEncoder(w).Encode(data)
 }
 
-func checkForPhp(filePath string) bool {
-	suffixes := []string{".php", ".phtml", ".php5"}
-
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(filePath, suffix) {
+func checkForPhp(filePath string, extScriptTypes []string) bool {
+	for _, suffix := range extScriptTypes {
+		if strings.HasSuffix(filePath, "."+suffix) {
 			return true
 		}
 	}

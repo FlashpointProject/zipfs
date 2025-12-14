@@ -28,7 +28,7 @@ type RewriteRule struct {
 type RewriteCond struct {
 	TestString string
 	Pattern    *regexp.Regexp
-	Flags      []string
+	Flags      map[string]string
 }
 
 // HtaccessHandler wraps the parsed .htaccess rules
@@ -112,6 +112,27 @@ func parseRewriteRule(line string) (RewriteRule, error) {
 		return RewriteRule{}, fmt.Errorf("invalid RewriteRule: %s", line)
 	}
 
+	flags := make(map[string]string)
+	if len(parts) >= 4 {
+		flagStr := strings.Trim(parts[3], "[]")
+		flagList := strings.Split(flagStr, ",")
+		for _, flag := range flagList {
+			flag = strings.TrimSpace(flag)
+			if strings.Contains(flag, "=") {
+				kv := strings.SplitN(flag, "=", 2)
+				flags[kv[0]] = kv[1]
+			} else {
+				flags[flag] = "true"
+			}
+		}
+	}
+
+	// Add (?i) prefix for case-insensitive matching if NC flag is present
+	patternStr := parts[1]
+	if _, hasNC := flags["NC"]; hasNC {
+		patternStr = "(?i)" + patternStr
+	}
+
 	pattern, err := regexp.Compile(parts[1])
 	if err != nil {
 		return RewriteRule{}, fmt.Errorf("invalid pattern in RewriteRule: %w", err)
@@ -120,22 +141,7 @@ func parseRewriteRule(line string) (RewriteRule, error) {
 	rule := RewriteRule{
 		Pattern:      pattern,
 		Substitution: parts[2],
-		Flags:        make(map[string]string),
-	}
-
-	// Parse flags [L,R=301,QSA]
-	if len(parts) >= 4 {
-		flagStr := strings.Trim(parts[3], "[]")
-		flags := strings.Split(flagStr, ",")
-		for _, flag := range flags {
-			flag = strings.TrimSpace(flag)
-			if strings.Contains(flag, "=") {
-				kv := strings.SplitN(flag, "=", 2)
-				rule.Flags[kv[0]] = kv[1]
-			} else {
-				rule.Flags[flag] = "true"
-			}
-		}
+		Flags:        flags,
 	}
 
 	return rule, nil
@@ -149,7 +155,28 @@ func parseRewriteCond(line string) (RewriteCond, error) {
 		return RewriteCond{}, fmt.Errorf("invalid RewriteCond: %s", line)
 	}
 
-	pattern, err := regexp.Compile(parts[2])
+	flags := make(map[string]string)
+	if len(parts) >= 4 {
+		flagStr := strings.Trim(parts[3], "[]")
+		flagList := strings.Split(flagStr, ",")
+		for _, flag := range flagList {
+			flag = strings.TrimSpace(flag)
+			if strings.Contains(flag, "=") {
+				kv := strings.SplitN(flag, "=", 2)
+				flags[kv[0]] = kv[1]
+			} else {
+				flags[flag] = "true"
+			}
+		}
+	}
+
+	// Add (?i) prefix for case-insensitive matching if NC flag is present
+	patternStr := parts[2]
+	if _, hasNC := flags["NC"]; hasNC {
+		patternStr = "(?i)" + patternStr
+	}
+
+	pattern, err := regexp.Compile(patternStr)
 	if err != nil {
 		return RewriteCond{}, fmt.Errorf("invalid pattern in RewriteCond: %w", err)
 	}
@@ -157,13 +184,7 @@ func parseRewriteCond(line string) (RewriteCond, error) {
 	cond := RewriteCond{
 		TestString: parts[1],
 		Pattern:    pattern,
-		Flags:      []string{},
-	}
-
-	// Parse flags
-	if len(parts) >= 4 {
-		flagStr := strings.Trim(parts[3], "[]")
-		cond.Flags = strings.Split(flagStr, ",")
+		Flags:      flags,
 	}
 
 	return cond, nil
@@ -317,7 +338,7 @@ func (h *HtaccessHandler) expandVariables(str string, r *http.Request) string {
 		"%{HTTP_HOST}":        r.Host,
 		"%{REMOTE_ADDR}":      r.RemoteAddr,
 		"%{REQUEST_FILENAME}": r.URL.Path,
-		"%{DOCUMENT_ROOT}":    "/var/www/html", // Configure as needed
+		"%{DOCUMENT_ROOT}":    "/", // Configure as needed
 		"%{SERVER_NAME}":      r.Host,
 		"%{SERVER_PORT}":      "80", // Configure as needed
 		"%{HTTPS}": func() string {
