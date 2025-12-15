@@ -11,6 +11,7 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -133,11 +134,17 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.Context().Value(CtxUsingHtaccess) != nil {
 			// Htaccess, map url back to /content/<host>/<path>
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/")
-			r.URL.Path = fmt.Sprintf("/content/%s/%s", r.URL.Host, r.URL.Path)
+			if r.Context().Value(CtxPerformedRewrite) != nil {
+				r.URL.Path = fmt.Sprintf("/content/%s", r.URL.Path)
+			} else {
+				r.URL.Path = fmt.Sprintf("/content/%s/%s", r.URL.Hostname(), r.URL.Path)
+			}
 		}
-		// fmt.Printf("Final Path: %s\n", r.URL.Path)
+		fmt.Printf("Final Path: %s\n", r.URL.Path)
 		serveFiles(w, r, h, path.Clean(r.URL.Path), true, h.phpPath)
 	})
+
+	fmt.Printf("Requested URL (minus query): http:/%s\n", r.URL.Path)
 
 	htaccessChain, hasHtaccess := h.GetHtaccessChain(r.URL.Path, fileServingHandler)
 	if hasHtaccess {
@@ -161,6 +168,48 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		fileServingHandler.ServeHTTP(w, r)
 	}
+}
+
+func (h *fileHandler) HTAFileExists(path string) bool {
+	path = "/content/" + strings.TrimPrefix(path, "/")
+	// fmt.Printf("Check file: %s\n", path)
+	for _, fse := range h.fs {
+		fii, err := fse.openFileInfo(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			fmt.Printf("Error checking hta file exists?: %s\n", err.Error())
+			return false
+		}
+
+		if fii.IsDir() {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+func (h *fileHandler) HTADirExists(path string) bool {
+	path = "/content/" + strings.TrimPrefix(path, "/")
+	// fmt.Printf("Check dir: %s\n", path)
+	for _, fse := range h.fs {
+		fii, err := fse.openFileInfo(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			fmt.Printf("Error checking hta dir exists?: %s\n", err.Error())
+			return false
+		}
+
+		if fii.IsDir() {
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 // Add a ZIP file at runtime.
@@ -296,7 +345,9 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Parse .htaccess file
-			handler, err := CreateHtaccessHandler(tmpFile.Name(), nil, nil, nil)
+			fileExistsFunc := FileExistsFunc(h.HTAFileExists)
+			dirExistsFunc := DirExistsFunc(h.HTADirExists)
+			handler, err := CreateHtaccessHandler(tmpFile.Name(), nil, &fileExistsFunc, &dirExistsFunc)
 			os.Remove(tmpFile.Name()) // Clean up temp file
 
 			if err != nil {

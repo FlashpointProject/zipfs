@@ -2,6 +2,7 @@ package zipfs
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,7 +14,8 @@ import (
 type contextKey string
 
 const (
-	CtxUsingHtaccess contextKey = "using-htaccess"
+	CtxUsingHtaccess    contextKey = "using-htaccess"
+	CtxPerformedRewrite contextKey = "performed-rewrite"
 )
 
 // RewriteRule represents a single Apache RewriteRule
@@ -278,6 +280,12 @@ func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Add ctx flag for fileserver
+		if r.Context().Value(CtxPerformedRewrite) == nil {
+			ctx := context.WithValue(r.Context(), CtxPerformedRewrite, true)
+			r = r.WithContext(ctx)
+		}
+
 		workingPath = rule.Substitution
 
 		// Replace $N backreferences from RewriteRule pattern
@@ -371,7 +379,7 @@ func (h *HtaccessHandler) checkConditions(conditions []RewriteCond, patternMatch
 			success = h.fileExists(testValue)
 		case "-d":
 			// Check directory exists
-			success = h.fileExists(testValue)
+			success = h.dirExists(testValue)
 		default:
 			// Assume regex
 			matches := cond.Pattern.FindStringSubmatch(testValue)
@@ -405,12 +413,13 @@ func (h *HtaccessHandler) checkConditions(conditions []RewriteCond, patternMatch
 // expandVariables expands Apache variables like %{REQUEST_URI}
 func (h *HtaccessHandler) expandVariables(str string, r *http.Request) string {
 	replacements := map[string]string{
-		"%{REQUEST_URI}":      r.RequestURI,
-		"%{REQUEST_METHOD}":   r.Method,
-		"%{QUERY_STRING}":     r.URL.RawQuery,
-		"%{HTTP_HOST}":        r.Host,
-		"%{REMOTE_ADDR}":      r.RemoteAddr,
-		"%{REQUEST_FILENAME}": r.URL.Path,
+		"%{REQUEST_URI}":    r.RequestURI,
+		"%{REQUEST_METHOD}": r.Method,
+		"%{QUERY_STRING}":   r.URL.RawQuery,
+		"%{HTTP_HOST}":      r.Host,
+		"%{REMOTE_ADDR}":    r.RemoteAddr,
+		// This works for reasons beyond my understanding
+		"%{REQUEST_FILENAME}": fmt.Sprintf("%s%s", r.URL.Hostname(), r.URL.Path),
 		"%{DOCUMENT_ROOT}":    "", // Configure as needed
 		"%{SERVER_NAME}":      r.Host,
 		"%{SERVER_PORT}":      "80", // Configure as needed

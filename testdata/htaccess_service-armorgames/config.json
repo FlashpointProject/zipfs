@@ -6,9 +6,6 @@
   "mock_files": [
     "/services.armorgames.com/api/user.php"
   ],
-  "mock_dirs": [
-    "test"
-  ],
   "test_cases": [
     {
       "name": "Different hostname should not trigger rewrite",
