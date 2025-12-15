@@ -12,7 +12,7 @@
       "redirect_url": "http://kasane-keyboard.com/_next/imageswitch-linear.webp"
     },
     {
-      "name": "Different website URL should pass through",
+      "name": "Different hostname should not trigger rewrite",
       "request_url": "http://site.com/other-page?url=%2Fother%2Fpath.jpg",
       "request_method": "GET"
     },

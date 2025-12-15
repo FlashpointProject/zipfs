@@ -13,7 +13,7 @@ import (
 type contextKey string
 
 const (
-	CtxEmulatedUrl contextKey = "emulatedUrl"
+	CtxUsingHtaccess contextKey = "using-htaccess"
 )
 
 // RewriteRule represents a single Apache RewriteRule
@@ -26,29 +26,55 @@ type RewriteRule struct {
 
 // RewriteCond represents a RewriteCond directive
 type RewriteCond struct {
-	TestString string
-	Pattern    *regexp.Regexp
-	Flags      map[string]string
+	TestString  string
+	CondPattern string
+	Pattern     *regexp.Regexp
+	Flags       map[string]string
 }
+
+type FileExistsFunc func(path string) (exists bool)
+type DirExistsFunc func(path string) (exists bool)
 
 // HtaccessHandler wraps the parsed .htaccess rules
 type HtaccessHandler struct {
 	Rules       []RewriteRule
 	RewriteBase string
 	Next        http.Handler
+	fileExists  FileExistsFunc
+	dirExists   DirExistsFunc
+}
+
+func defaultFileExists(path string) bool {
+	return false
+}
+
+func defaultDirExists(path string) bool {
+	return false
 }
 
 // ParseHTAccess parses a .htaccess file and returns a handler
-func CreateHtaccessHandler(filepath string, next http.Handler) (*HtaccessHandler, error) {
+func CreateHtaccessHandler(filepath string, next http.Handler, fileExists *FileExistsFunc, dirExists *DirExistsFunc) (*HtaccessHandler, error) {
 	file, err := os.Open(filepath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open .htaccess: %w", err)
 	}
 	defer file.Close()
 
+	fileExistsFunc := defaultFileExists
+	if fileExists != nil {
+		fileExistsFunc = *fileExists
+	}
+
+	dirExistsFunc := defaultDirExists
+	if dirExists != nil {
+		dirExistsFunc = *dirExists
+	}
+
 	handler := &HtaccessHandler{
-		Rules: []RewriteRule{},
-		Next:  next,
+		Rules:      []RewriteRule{},
+		Next:       next,
+		fileExists: fileExistsFunc,
+		dirExists:  dirExistsFunc,
 	}
 
 	scanner := bufio.NewScanner(file)
@@ -133,7 +159,7 @@ func parseRewriteRule(line string) (RewriteRule, error) {
 		patternStr = "(?i)" + patternStr
 	}
 
-	pattern, err := regexp.Compile(parts[1])
+	pattern, err := regexp.Compile(patternStr)
 	if err != nil {
 		return RewriteRule{}, fmt.Errorf("invalid pattern in RewriteRule: %w", err)
 	}
@@ -149,42 +175,42 @@ func parseRewriteRule(line string) (RewriteRule, error) {
 
 // parseRewriteCond parses a RewriteCond line
 func parseRewriteCond(line string) (RewriteCond, error) {
-	// RewriteCond %{REQUEST_URI} pattern [flags]
+	// RewriteCond TestString CondPattern [flags]
 	parts := splitRewriteLine(line)
 	if len(parts) < 3 {
 		return RewriteCond{}, fmt.Errorf("invalid RewriteCond: %s", line)
 	}
 
+	// Check for bracketed flags e.g [L], [L,QSA]
 	flags := make(map[string]string)
 	if len(parts) >= 4 {
-		flagStr := strings.Trim(parts[3], "[]")
-		flagList := strings.Split(flagStr, ",")
-		for _, flag := range flagList {
-			flag = strings.TrimSpace(flag)
-			if strings.Contains(flag, "=") {
-				kv := strings.SplitN(flag, "=", 2)
-				flags[kv[0]] = kv[1]
-			} else {
-				flags[flag] = "true"
+		flagRawStr := parts[len(parts)-1]
+		if strings.HasPrefix(flagRawStr, "[") {
+			flagStr := strings.Trim(flagRawStr, "[]")
+			flagList := strings.Split(flagStr, ",")
+			for _, flag := range flagList {
+				flag = strings.TrimSpace(flag)
+				if strings.Contains(flag, "=") {
+					kv := strings.SplitN(flag, "=", 2)
+					flags[kv[0]] = kv[1]
+				} else {
+					flags[flag] = "true"
+				}
 			}
 		}
 	}
 
-	// Add (?i) prefix for case-insensitive matching if NC flag is present
-	patternStr := parts[2]
-	if _, hasNC := flags["NC"]; hasNC {
-		patternStr = "(?i)" + patternStr
-	}
-
-	pattern, err := regexp.Compile(patternStr)
+	pattern, err := regexp.Compile(parts[2])
 	if err != nil {
-		return RewriteCond{}, fmt.Errorf("invalid pattern in RewriteCond: %w", err)
+		// Validate non-regex?
+		pattern = nil
 	}
 
 	cond := RewriteCond{
-		TestString: parts[1],
-		Pattern:    pattern,
-		Flags:      flags,
+		TestString:  parts[1],
+		CondPattern: parts[2],
+		Pattern:     pattern,
+		Flags:       flags,
 	}
 
 	return cond, nil
@@ -226,29 +252,43 @@ func splitRewriteLine(line string) []string {
 // ServeHTTP implements http.Handler
 func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	workingPath := r.URL.Path
+	workingPath = strings.TrimPrefix(workingPath, "/")
 	// println("Initial path: ", workingPath)
 
 	for _, rule := range h.Rules {
 		// fmt.Printf("Rule %d: Pattern=%s, Substitution=%s, Flags=%v\n",
 		// 	i, rule.Pattern.String(), rule.Substitution, rule.Flags)
 
+		// Evaluate Rule Pattern so we can pass matcher to checkConditions later
+		patternMatches := rule.Pattern.FindStringSubmatch(workingPath)
+		// fmt.Printf("Pattern match: %v\n", patternMatches)
+
 		// Check conditions first
-		condMatches := h.checkConditionsWithCaptures(rule.Conditions, r)
-		if condMatches == nil {
+		condFailure, condMatches := h.checkConditions(rule.Conditions, patternMatches, r)
+		if condFailure != nil {
+			// fmt.Printf("FAILED COND - TestString: %s, CondPattern: %s, Pattern: %s, Flags:%v\n",
+			// 	condFailure.TestString, condFailure.CondPattern, condFailure.Pattern, condFailure.Flags)
+			// Condition failed, move to next rule
 			continue
 		}
 
 		// Check if pattern matches
 		if !rule.Pattern.MatchString(workingPath) {
+			fmt.Println("Pattern doesn't match rule?")
 			continue
 		}
 
-		// Perform substitution
-		workingPath = rule.Pattern.ReplaceAllString(workingPath, rule.Substitution)
+		workingPath = rule.Substitution
+
+		// Replace $N backreferences from RewriteRule pattern
+		for i, match := range patternMatches {
+			placeholder := fmt.Sprintf("$%d", i)
+			workingPath = strings.ReplaceAll(workingPath, placeholder, match)
+		}
 
 		// Replace %N backreferences from RewriteCond
 		for i, match := range condMatches {
-			placeholder := fmt.Sprintf("%%%d", i+1)
+			placeholder := fmt.Sprintf("%%%d", i)
 			workingPath = strings.ReplaceAll(workingPath, placeholder, match)
 		}
 
@@ -295,38 +335,71 @@ func (h *HtaccessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// checkConditionsWithCaptures evaluates conditions and returns captured groups
-func (h *HtaccessHandler) checkConditionsWithCaptures(conditions []RewriteCond, r *http.Request) []string {
-	var allCaptures []string
+// checkConditions evaluates conditions and returns captured group
+func (h *HtaccessHandler) checkConditions(conditions []RewriteCond, patternMatches []string, r *http.Request) (*RewriteCond, []string) {
+	var lastCapture []string
+	success := true
 
 	for _, cond := range conditions {
 		testValue := h.expandVariables(cond.TestString, r)
-
-		matches := cond.Pattern.FindStringSubmatch(testValue)
-		if matches == nil {
-			return nil // Condition failed
+		// Backfill %num refs from previous cond captures
+		if len(lastCapture) > 0 {
+			for i, match := range lastCapture {
+				placeholder := fmt.Sprintf("%%%d", i)
+				testValue = strings.ReplaceAll(testValue, placeholder, match)
+			}
 		}
-
-		// Store captures (skip full match at index 0)
-		if len(matches) > 1 {
-			allCaptures = append(allCaptures, matches[1:]...)
+		// Backfill $num refs from rule pattern
+		if len(patternMatches) > 0 {
+			for i, match := range patternMatches {
+				placeholder := fmt.Sprintf("$%d", i)
+				testValue = strings.ReplaceAll(testValue, placeholder, match)
+			}
 		}
+		_, hasOR := cond.Flags["OR"]
 
-		// Handle flags
-		hasOR := false
-		for _, flag := range cond.Flags {
-			if flag == "OR" {
-				hasOR = true
-				break
+		condPattern := cond.CondPattern
+		negateResult := false
+		if strings.HasPrefix(condPattern, "!") && len(condPattern) > 1 {
+			negateResult = true
+			condPattern = condPattern[1:]
+		}
+		// Check type of condition
+		switch condPattern {
+		case "-f":
+			// Check file exists
+			success = h.fileExists(testValue)
+		case "-d":
+			// Check directory exists
+			success = h.fileExists(testValue)
+		default:
+			// Assume regex
+			matches := cond.Pattern.FindStringSubmatch(testValue)
+			if matches == nil && !hasOR && !negateResult {
+				// Match failed
+				return &cond, nil
+			}
+			success = matches != nil // Save success of rule
+
+			// Store captures (skip full match at index 0)
+			if len(matches) > 1 {
+				lastCapture = matches
 			}
 		}
 
-		if hasOR && len(matches) > 0 {
-			continue // OR succeeded, continue to next condition
+		if negateResult {
+			success = !success
 		}
+
+		if !hasOR && !success {
+			// Rule failed, not in an OR, skip rule
+			return &cond, lastCapture
+		}
+
+		// Rule passed, or we're in an OR and it'll resolve on the next conds
 	}
 
-	return allCaptures
+	return nil, lastCapture
 }
 
 // expandVariables expands Apache variables like %{REQUEST_URI}
@@ -338,7 +411,7 @@ func (h *HtaccessHandler) expandVariables(str string, r *http.Request) string {
 		"%{HTTP_HOST}":        r.Host,
 		"%{REMOTE_ADDR}":      r.RemoteAddr,
 		"%{REQUEST_FILENAME}": r.URL.Path,
-		"%{DOCUMENT_ROOT}":    "/", // Configure as needed
+		"%{DOCUMENT_ROOT}":    "", // Configure as needed
 		"%{SERVER_NAME}":      r.Host,
 		"%{SERVER_PORT}":      "80", // Configure as needed
 		"%{HTTPS}": func() string {
@@ -374,7 +447,8 @@ func (h *HtaccessHandler) handleFlags(w http.ResponseWriter, r *http.Request, ne
 			if r.TLS != nil {
 				scheme = "https"
 			}
-			redirectURL = fmt.Sprintf("%s://%s%s", scheme, r.Host, newPath)
+			newPath = strings.TrimPrefix(newPath, "/")
+			redirectURL = fmt.Sprintf("%s://%s/%s", scheme, r.Host, newPath)
 		}
 
 		// [QSD] - Query String Discard (don't append query string)
@@ -389,6 +463,7 @@ func (h *HtaccessHandler) handleFlags(w http.ResponseWriter, r *http.Request, ne
 			redirectURL += separator + r.URL.RawQuery
 		}
 
+		// fmt.Printf("REDIRECT URL: %s\n", redirectURL)
 		http.Redirect(w, r, redirectURL, code)
 		return true
 	}

@@ -1,8 +1,25 @@
 {
-  "name": "Armorgames Services Rewrite",
+  "name": "Armorgames Services Rewrite w/ File check",
   "htaccess": {
     "services.armorgames.com": "root.htaccess"
   },
+  "mock_files": [
+    "/services.armorgames.com/api/user.php"
+  ],
+  "mock_dirs": [
+    "test"
+  ],
   "test_cases": [
+    {
+      "name": "Different hostname should not trigger rewrite",
+      "request_url": "http://services.armorgames.com/api/user",
+      "request_method": "GET",
+      "returned_file": "/services.armorgames.com/api/user.php"
+    },
+    {
+      "name": "Different hostname should not trigger rewrite",
+      "request_url": "http://site.com/other-page",
+      "request_method": "GET"
+    }
   ]
 }

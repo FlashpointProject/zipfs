@@ -9,6 +9,7 @@ package zipfs
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -129,17 +130,33 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fileServingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// fmt.Printf("File serving - Emulated URL: %s (Host: %s, Path: %s)\n",
-		// 	r.URL.String(), r.URL.Host, r.URL.Path)
-		if !strings.HasPrefix(r.URL.Path, "/content/") {
-			r.URL.Path = "/content" + r.URL.Path
+		if r.Context().Value(CtxUsingHtaccess) != nil {
+			// Htaccess, map url back to /content/<host>/<path>
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/")
+			r.URL.Path = fmt.Sprintf("/content/%s/%s", r.URL.Host, r.URL.Path)
 		}
+		// fmt.Printf("Final Path: %s\n", r.URL.Path)
 		serveFiles(w, r, h, path.Clean(r.URL.Path), true, h.phpPath)
 	})
 
-	htaccessChain := h.GetHtaccessChain(r.URL.Path, fileServingHandler)
-	if htaccessChain != nil {
+	htaccessChain, hasHtaccess := h.GetHtaccessChain(r.URL.Path, fileServingHandler)
+	if hasHtaccess {
+		// Form new request url for htaccess to work
 		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/content")
+		newUrl, err := url.Parse(fmt.Sprintf("http:/%s", r.URL.Path))
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		newUrl.RawQuery = r.URL.RawQuery
+		newUrl.Fragment = r.URL.Fragment
+		r.URL = newUrl
+		r.Host = r.URL.Host
+
+		ctx := context.WithValue(r.Context(), CtxUsingHtaccess, true)
+		r = r.WithContext(ctx)
+
+		// fmt.Printf("Htaccess url check: %s\n", r.URL.String())
 		htaccessChain.ServeHTTP(w, r)
 	} else {
 		fileServingHandler.ServeHTTP(w, r)
@@ -261,6 +278,7 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		for dirPath, content := range htaccessFiles {
+			dirPath := "content" + string(os.PathSeparator) + dirPath
 			// Write content to temporary file for parsing
 			tmpFile, err := os.CreateTemp("", ".htaccess-*")
 			if err != nil {
@@ -278,7 +296,7 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Parse .htaccess file
-			handler, err := CreateHtaccessHandler(tmpFile.Name(), nil)
+			handler, err := CreateHtaccessHandler(tmpFile.Name(), nil, nil, nil)
 			os.Remove(tmpFile.Name()) // Clean up temp file
 
 			if err != nil {
@@ -286,7 +304,6 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			println("Registering handler to %s", dirPath)
 			h.htaccessHandlers[dirPath] = handler
 
 			if h.isVerbose {
@@ -423,23 +440,16 @@ func (h *fileHandler) ListMountedFs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(ml)
 }
 
-func (h *fileHandler) GetHtaccessChain(requestPath string, finalHandler http.Handler) http.Handler {
-	// println("Building request handler for ", requestPath)
-	requestPath = strings.TrimPrefix(requestPath, "/content/")
+func (h *fileHandler) GetHtaccessChain(requestPath string, finalHandler http.Handler) (http.Handler, bool) {
 	// println("Matching ", requestPath)
 	h.htaccessMutex.RLock()
 	defer h.htaccessMutex.RUnlock()
-
-	if len(h.htaccessHandlers) == 0 {
-		return finalHandler // No .htaccess, return final handler directly
-	}
-
 	return BuildHtaccessChain(h.htaccessHandlers, requestPath, finalHandler)
 }
 
-func BuildHtaccessChain(htaccessHandlers map[string]*HtaccessHandler, requestPath string, finalHandler http.Handler) http.Handler {
+func BuildHtaccessChain(htaccessHandlers map[string]*HtaccessHandler, requestPath string, finalHandler http.Handler) (http.Handler, bool) {
 	if len(htaccessHandlers) == 0 {
-		return finalHandler // No .htaccess, return final handler directly
+		return finalHandler, false // No .htaccess, return final handler directly
 	}
 
 	// Find all .htaccess files that apply to this path
@@ -466,7 +476,7 @@ func BuildHtaccessChain(htaccessHandlers map[string]*HtaccessHandler, requestPat
 	}
 
 	if len(handlers) == 0 {
-		return finalHandler // No applicable .htaccess, return final handler
+		return finalHandler, false // No applicable .htaccess, return final handler
 	}
 
 	// Chain handlers from deepest to root, with finalHandler at the end
@@ -478,7 +488,7 @@ func BuildHtaccessChain(htaccessHandlers map[string]*HtaccessHandler, requestPat
 		chainedHandler = &handlerCopy
 	}
 
-	return chainedHandler
+	return chainedHandler, true
 }
 
 // name is '/'-separated, not filepath.Separator.
