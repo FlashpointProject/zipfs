@@ -13,8 +13,6 @@ func Cgi(w http.ResponseWriter, r *http.Request, phpBin string, scriptFileName s
 	handler.Path = phpBin
 	handler.Env = append(handler.Env, "REDIRECT_STATUS=CGI")
 	handler.Env = append(handler.Env, "SCRIPT_FILENAME="+strings.ReplaceAll(scriptFileName, "\\", "/"))
-	handler.Env = append(handler.Env, "DOCUMENT_ROOT="+strings.ReplaceAll(htdocsPath, "\\", "/"))
-	handler.Env = append(handler.Env, "CONTEXT_DOCUMENT_ROOT="+strings.ReplaceAll(htdocsPath, "\\", "/"))
 
 	// Unchunk the request body when required
 	if len(r.TransferEncoding) > 0 && r.TransferEncoding[0] == "chunked" {
@@ -22,7 +20,7 @@ func Cgi(w http.ResponseWriter, r *http.Request, phpBin string, scriptFileName s
 		r.TransferEncoding = r.TransferEncoding[1:]
 	}
 
-	if r.Body != nil && r.ContentLength > 10*1024*1024 { // Only do for > 10MB responses
+	if r.Body != nil { // Only do for > 10MB responses
 		// Save body into temp file (don't want large request bodies eating memory)
 		tmpfile, err := os.CreateTemp("", "fp-cgi-")
 		if err != nil {
