@@ -20,10 +20,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+const htmlContent = `<html><body>Intentionally Empty File</body></html>`
 
 // FileServer returns a HTTP handler that serves
 // HTTP requests with the contents of the ZIP file system.
@@ -57,7 +60,7 @@ func FileServers(fs []*FileSystem, baseAPIPath string, urlPrepend string, isVerb
 	return h
 }
 
-func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string, mimeExts map[string]string, extScriptTypes []string, overrideBases []string, htdocsPath string) http.Handler {
+func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, indexExts []string, baseMountDir string, phpPath string, mimeExts map[string]string, extScriptTypes []string, overrideBases []string, htdocsPath string, enableHtaccess bool) http.Handler {
 	return &fileHandler{
 		baseAPIPath:    baseAPIPath,
 		isVerbose:      isVerbose,
@@ -69,6 +72,7 @@ func EmptyFileServer(baseAPIPath string, urlPrepend string, isVerbose bool, inde
 		extScriptTypes: extScriptTypes,
 		overrideBases:  overrideBases,
 		htdocsPath:     htdocsPath,
+		enableHtaccess: enableHtaccess,
 	}
 }
 
@@ -84,6 +88,7 @@ type fileHandler struct {
 	extScriptTypes   []string
 	overrideBases    []string
 	htdocsPath       string
+	enableHtaccess   bool
 	htaccessHandlers map[string]*HtaccessHandler
 	htaccessMutex    sync.RWMutex
 }
@@ -140,34 +145,37 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				r.URL.Path = fmt.Sprintf("/content/%s/%s", r.URL.Hostname(), r.URL.Path)
 			}
 		}
-		fmt.Printf("Final Path: %s\n", r.URL.Path)
+		// fmt.Printf("Final Path: %s\n", r.URL.Path)
 		serveFiles(w, r, h, path.Clean(r.URL.Path), true, h.phpPath)
 	})
 
-	fmt.Printf("Requested URL (minus query): http:/%s\n", r.URL.Path)
+	// fmt.Printf("Requested URL (minus query): http:/%s\n", r.URL.Path)
 
-	htaccessChain, hasHtaccess := h.GetHtaccessChain(r.URL.Path, fileServingHandler)
-	if hasHtaccess {
-		// Form new request url for htaccess to work
-		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/content")
-		newUrl, err := url.Parse(fmt.Sprintf("http:/%s", r.URL.Path))
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
+	if h.enableHtaccess {
+		htaccessChain, hasHtaccess := h.GetHtaccessChain(r.URL.Path, fileServingHandler)
+		if hasHtaccess {
+			// Form new request url for htaccess to work
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/content")
+			newUrl, err := url.Parse(fmt.Sprintf("http:/%s", r.URL.Path))
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			newUrl.RawQuery = r.URL.RawQuery
+			newUrl.Fragment = r.URL.Fragment
+			r.URL = newUrl
+			r.Host = r.URL.Host
+
+			ctx := context.WithValue(r.Context(), CtxUsingHtaccess, true)
+			r = r.WithContext(ctx)
+
+			// fmt.Printf("Htaccess url check: %s\n", r.URL.String())
+			htaccessChain.ServeHTTP(w, r)
 			return
 		}
-		newUrl.RawQuery = r.URL.RawQuery
-		newUrl.Fragment = r.URL.Fragment
-		r.URL = newUrl
-		r.Host = r.URL.Host
-
-		ctx := context.WithValue(r.Context(), CtxUsingHtaccess, true)
-		r = r.WithContext(ctx)
-
-		// fmt.Printf("Htaccess url check: %s\n", r.URL.String())
-		htaccessChain.ServeHTTP(w, r)
-	} else {
-		fileServingHandler.ServeHTTP(w, r)
 	}
+
+	fileServingHandler.ServeHTTP(w, r)
 }
 
 func (h *fileHandler) HTAFileExists(path string) bool {
@@ -320,7 +328,7 @@ func (h *fileHandler) MountFs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse .htaccess files and create handlers
-	if htaccessCount > 0 {
+	if h.enableHtaccess && htaccessCount > 0 {
 		h.htaccessMutex.Lock()
 		if h.htaccessHandlers == nil {
 			h.htaccessHandlers = make(map[string]*HtaccessHandler)
@@ -682,6 +690,16 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 			continue
 		}
 
+		// Intercept if we're serving /content/www.mochiads.com/static/lib/services/services.swf and it's smaller than 10kb (probably parked page)
+		if strings.HasPrefix(name, "/content/www.mochiads.com/static/lib/services/services.swf") && fi.Size() < 10*1024 {
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("Content-Length", strconv.Itoa(len(htmlContent)))
+			w.Header().Set("ZIPSVR_FILENAME", "/empty.html")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(htmlContent))
+			return
+		}
+
 		//Now that we have a file, override the mime-type if it on the list
 		mimeOverride, ok := h.mimeExts[strings.ToLower(filepath.Ext(path.Base(fi.Name())))]
 		if ok {
@@ -753,7 +771,7 @@ func serveIdentity(w http.ResponseWriter, r *http.Request, fi *fileInfo, phpPath
 		// Run the file from the htdocs directory instead
 		htdocsFile := path.Clean(path.Join(htdocsPath, fileName))
 		fmt.Printf("Executing PHP Script: %s\n", fileName)
-		Cgi(w, r, phpPath, htdocsFile)
+		Cgi(w, r, phpPath, htdocsFile, htdocsPath)
 		return
 	}
 
