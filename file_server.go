@@ -552,18 +552,6 @@ func BuildHtaccessChain(htaccessHandlers map[string]*HtaccessHandler, requestPat
 
 // name is '/'-separated, not filepath.Separator.
 func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name string, redirect bool, phpPath string) {
-	//If a file is attempting to be served, but no zips are available
-	//We want to fail gracefully.
-	const indexPage = "/index.html"
-
-	// redirect .../index.html to .../
-	// can't use Redirect() because that would make the path absolute,
-	// which would be a problem running under StripPrefix
-	if strings.HasSuffix(r.URL.Path, indexPage) {
-		localRedirect(w, r, "./")
-		return
-	}
-
 	var fi *fileInfo
 	var fsVal *FileSystem
 	var errVal error
@@ -627,6 +615,8 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 		}
 	}
 
+	//If a file is attempting to be served, but no zips are available
+	//We want to fail gracefully.
 	if len(h.fs) == 0 {
 		http.Error(w, "File not found, no ZIP is added.", http.StatusNotFound)
 		return
@@ -643,12 +633,42 @@ func serveFiles(w http.ResponseWriter, r *http.Request, h *fileHandler, name str
 		fsVal = fse
 		fi = fii
 
-		//If we did not find a file above it will note the error and
-		//move onto the next zip to see if the file is there.
+		// If we did not find a file, see if an alternative file can be served before giving up and continuing to the next zip
 		if errVal != nil {
-			errFlag = true
-			errMsg, errCode = toHTTPError(errVal)
-			continue
+			// Check if the file would be a valid index file if it existed
+			wantsIndex := false
+			prefix := "index."
+			fb := path.Base(r.URL.Path)
+			if strings.HasPrefix(fb, prefix) {
+				fe := fb[len(prefix):]
+				for _, extension := range h.indexExts {
+					if fe == extension {
+						wantsIndex = true
+						break
+					}
+				}
+			}
+
+			// If the above check is successful, search for alternative index files in the directory
+			foundIndex := false
+			if wantsIndex {
+				for _, extension := range h.indexExts {
+					index := path.Join(strings.TrimPrefix(path.Dir(name), "/"), "index."+extension)
+					fii, err := fsVal.openFileInfo(index)
+					if err == nil {
+						fi = fii
+						foundIndex = true
+						break
+					}
+				}
+			}
+
+			// Continue to the next zip if either of the above checks fails
+			if !foundIndex && err != nil {
+				errFlag = true
+				errMsg, errCode = toHTTPError(errVal)
+				continue
+			}
 		}
 
 		if redirect {
